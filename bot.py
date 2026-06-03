@@ -38,12 +38,12 @@ from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, Tabl
 
 load_dotenv()
 
-BOT_TOKEN = os.getenv("BOT_TOKEN", "8722454091:AAEDYtJELZgW5vukeClOoIZuRqopZi22SF4")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 DATABASE_PATH = os.getenv("DATABASE_PATH", "alliance_bot.sqlite3")
 CERTIFICATES_DIR = Path(os.getenv("CERTIFICATES_DIR", "certificates"))
 ADMIN_IDS = {
     int(admin_id.strip())
-    for admin_id in os.getenv("ADMIN_IDS", "1512651390, 2037528947, 1270787307, 92255614").split(",")
+    for admin_id in os.getenv("ADMIN_IDS", "").split(",")
     if admin_id.strip().isdigit()
 }
 
