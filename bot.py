@@ -16,8 +16,8 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import (
-    FSInputFile,
     CallbackQuery,
+    FSInputFile,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     KeyboardButton,
@@ -27,13 +27,16 @@ from aiogram.types import (
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from dotenv import load_dotenv
+from reportlab.graphics import renderPDF
+from reportlab.graphics.barcode.qr import QrCodeWidget
+from reportlab.graphics.shapes import Drawing
 from reportlab.lib import colors
-from reportlab.lib.pagesizes import A4
-from reportlab.lib.styles import getSampleStyleSheet
+from reportlab.lib.pagesizes import A4, landscape
 from reportlab.lib.units import mm
+from reportlab.lib.utils import ImageReader
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
-from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+from reportlab.pdfgen import canvas
 
 
 load_dotenv()
@@ -41,18 +44,27 @@ load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 DATABASE_PATH = os.getenv("DATABASE_PATH", "alliance_bot.sqlite3")
 CERTIFICATES_DIR = Path(os.getenv("CERTIFICATES_DIR", "certificates"))
+ASSETS_DIR = Path("assets")
+LOGO_PATH = ASSETS_DIR / "alliance-logo.jpeg"
+
+ALLIANCE_NAME = os.getenv("ALLIANCE_NAME", "Гражданский Альянс города Астаны")
+ALLIANCE_BIN = os.getenv("ALLIANCE_BIN", "")
+ALLIANCE_EMAIL = os.getenv("ALLIANCE_EMAIL", "")
+ALLIANCE_PHONE = os.getenv("ALLIANCE_PHONE", "")
+ALLIANCE_ADDRESS = os.getenv("ALLIANCE_ADDRESS", "")
+ALLIANCE_WEBSITE = os.getenv("ALLIANCE_WEBSITE", "")
+ALLIANCE_SOCIAL_URL = os.getenv("ALLIANCE_SOCIAL_URL", "")
+CERTIFICATE_VERIFY_BASE_URL = os.getenv("CERTIFICATE_VERIFY_BASE_URL", ALLIANCE_WEBSITE)
+CHAIRMAN_NAME = os.getenv("CHAIRMAN_NAME", "Утеуова Аяжан Дюсембаевна")
+CHAIRMAN_POSITION = os.getenv("CHAIRMAN_POSITION", "Председатель Гражданского Альянса города Астаны")
+
 ADMIN_IDS = {
     int(admin_id.strip())
     for admin_id in os.getenv("ADMIN_IDS", "").split(",")
     if admin_id.strip().isdigit()
 }
 
-
 router = Router()
-
-
-def normalize_phone(phone: str) -> str:
-    return "".join(character for character in phone if character.isdigit())
 
 
 class Registration(StatesGroup):
@@ -66,6 +78,7 @@ class Application(StatesGroup):
     confirming_identity = State()
     waiting_for_activity = State()
     waiting_for_company = State()
+    waiting_for_bin = State()
     preview = State()
 
 
@@ -93,9 +106,14 @@ class MembershipApplication:
     user_activity: str
     application_activity: str
     company_name: str
+    org_bin: str
     status: str
     admin_comment: str | None
     created_at: str
+
+
+def normalize_phone(phone: str) -> str:
+    return "".join(character for character in phone if character.isdigit())
 
 
 def connect_db() -> sqlite3.Connection:
@@ -123,6 +141,7 @@ def init_db() -> None:
                 telegram_id INTEGER NOT NULL,
                 application_activity TEXT NOT NULL,
                 company_name TEXT NOT NULL,
+                org_bin TEXT NOT NULL DEFAULT '',
                 status TEXT NOT NULL DEFAULT 'pending',
                 admin_id INTEGER,
                 admin_comment TEXT,
@@ -133,17 +152,19 @@ def init_db() -> None:
             );
             """
         )
-        columns = {
-            row["name"]
-            for row in connection.execute("PRAGMA table_info(users)").fetchall()
-        }
-        if "phone_normalized" not in columns:
+
+        user_columns = {row["name"] for row in connection.execute("PRAGMA table_info(users)").fetchall()}
+        if "phone_normalized" not in user_columns:
             connection.execute("ALTER TABLE users ADD COLUMN phone_normalized TEXT")
 
-        users_without_normalized_phone = connection.execute(
+        app_columns = {row["name"] for row in connection.execute("PRAGMA table_info(applications)").fetchall()}
+        if "org_bin" not in app_columns:
+            connection.execute("ALTER TABLE applications ADD COLUMN org_bin TEXT NOT NULL DEFAULT ''")
+
+        users_without_phone_key = connection.execute(
             "SELECT telegram_id, phone FROM users WHERE phone_normalized IS NULL OR phone_normalized = ''"
         ).fetchall()
-        for user in users_without_normalized_phone:
+        for user in users_without_phone_key:
             connection.execute(
                 "UPDATE users SET phone_normalized = ? WHERE telegram_id = ?",
                 (normalize_phone(user["phone"]), user["telegram_id"]),
@@ -154,13 +175,12 @@ def init_db() -> None:
                 "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_phone_normalized ON users(phone_normalized)"
             )
         except sqlite3.IntegrityError:
-            logging.warning("Could not create unique phone index because duplicate phone numbers already exist.")
+            logging.warning("Cannot create unique phone index: duplicate phones already exist.")
 
         connection.commit()
 
 
 def upsert_user(telegram_id: int, phone: str, full_name: str, iin: str, activity: str) -> None:
-    phone_normalized = normalize_phone(phone)
     with closing(connect_db()) as connection:
         connection.execute(
             """
@@ -176,7 +196,7 @@ def upsert_user(telegram_id: int, phone: str, full_name: str, iin: str, activity
             (
                 telegram_id,
                 phone,
-                phone_normalized,
+                normalize_phone(phone),
                 full_name,
                 iin,
                 activity,
@@ -192,17 +212,7 @@ def get_user(telegram_id: int) -> UserProfile | None:
             "SELECT telegram_id, phone, full_name, iin, activity FROM users WHERE telegram_id = ?",
             (telegram_id,),
         ).fetchone()
-
-    if row is None:
-        return None
-
-    return UserProfile(
-        telegram_id=row["telegram_id"],
-        phone=row["phone"],
-        full_name=row["full_name"],
-        iin=row["iin"],
-        activity=row["activity"],
-    )
+    return user_from_row(row) if row else None
 
 
 def get_user_by_phone(phone: str) -> UserProfile | None:
@@ -215,10 +225,10 @@ def get_user_by_phone(phone: str) -> UserProfile | None:
             """,
             (normalize_phone(phone),),
         ).fetchone()
+    return user_from_row(row) if row else None
 
-    if row is None:
-        return None
 
+def user_from_row(row: sqlite3.Row) -> UserProfile:
     return UserProfile(
         telegram_id=row["telegram_id"],
         phone=row["phone"],
@@ -228,17 +238,38 @@ def get_user_by_phone(phone: str) -> UserProfile | None:
     )
 
 
-def create_application(telegram_id: int, activity: str, company_name: str) -> int:
+def create_application(telegram_id: int, activity: str, company_name: str, org_bin: str) -> int:
     with closing(connect_db()) as connection:
         cursor = connection.execute(
             """
-            INSERT INTO applications (telegram_id, application_activity, company_name, created_at)
-            VALUES (?, ?, ?, ?)
+            INSERT INTO applications (telegram_id, application_activity, company_name, org_bin, created_at)
+            VALUES (?, ?, ?, ?, ?)
             """,
-            (telegram_id, activity, company_name, datetime.now().isoformat(timespec="seconds")),
+            (telegram_id, activity, company_name, org_bin, datetime.now().isoformat(timespec="seconds")),
         )
         connection.commit()
         return int(cursor.lastrowid)
+
+
+def application_select_sql(where_clause: str) -> str:
+    return f"""
+        SELECT
+            a.id,
+            a.telegram_id,
+            u.full_name,
+            u.phone,
+            u.iin,
+            u.activity AS user_activity,
+            a.application_activity,
+            a.company_name,
+            a.org_bin,
+            a.status,
+            a.admin_comment,
+            a.created_at
+        FROM applications a
+        JOIN users u ON u.telegram_id = a.telegram_id
+        {where_clause}
+    """
 
 
 def application_from_row(row: sqlite3.Row) -> MembershipApplication:
@@ -251,6 +282,7 @@ def application_from_row(row: sqlite3.Row) -> MembershipApplication:
         user_activity=row["user_activity"],
         application_activity=row["application_activity"],
         company_name=row["company_name"],
+        org_bin=row["org_bin"],
         status=row["status"],
         admin_comment=row["admin_comment"],
         created_at=row["created_at"],
@@ -260,53 +292,27 @@ def application_from_row(row: sqlite3.Row) -> MembershipApplication:
 def get_application(application_id: int) -> MembershipApplication | None:
     with closing(connect_db()) as connection:
         row = connection.execute(
-            """
-            SELECT
-                a.id,
-                a.telegram_id,
-                u.full_name,
-                u.phone,
-                u.iin,
-                u.activity AS user_activity,
-                a.application_activity,
-                a.company_name,
-                a.status,
-                a.admin_comment,
-                a.created_at
-            FROM applications a
-            JOIN users u ON u.telegram_id = a.telegram_id
-            WHERE a.id = ?
-            """,
+            application_select_sql("WHERE a.id = ?"),
             (application_id,),
         ).fetchone()
-
     return application_from_row(row) if row else None
 
 
 def list_pending_applications() -> list[MembershipApplication]:
     with closing(connect_db()) as connection:
         rows = connection.execute(
-            """
-            SELECT
-                a.id,
-                a.telegram_id,
-                u.full_name,
-                u.phone,
-                u.iin,
-                u.activity AS user_activity,
-                a.application_activity,
-                a.company_name,
-                a.status,
-                a.admin_comment,
-                a.created_at
-            FROM applications a
-            JOIN users u ON u.telegram_id = a.telegram_id
-            WHERE a.status = 'pending'
-            ORDER BY a.created_at ASC
-            """
+            application_select_sql("WHERE a.status = 'pending' ORDER BY a.created_at ASC")
         ).fetchall()
-
     return [application_from_row(row) for row in rows]
+
+
+def get_last_application(telegram_id: int) -> MembershipApplication | None:
+    with closing(connect_db()) as connection:
+        row = connection.execute(
+            application_select_sql("WHERE a.telegram_id = ? ORDER BY a.created_at DESC LIMIT 1"),
+            (telegram_id,),
+        ).fetchone()
+    return application_from_row(row) if row else None
 
 
 def update_application_status(
@@ -333,34 +339,6 @@ def update_application_status(
             ),
         )
         connection.commit()
-
-
-def get_last_application(telegram_id: int) -> MembershipApplication | None:
-    with closing(connect_db()) as connection:
-        row = connection.execute(
-            """
-            SELECT
-                a.id,
-                a.telegram_id,
-                u.full_name,
-                u.phone,
-                u.iin,
-                u.activity AS user_activity,
-                a.application_activity,
-                a.company_name,
-                a.status,
-                a.admin_comment,
-                a.created_at
-            FROM applications a
-            JOIN users u ON u.telegram_id = a.telegram_id
-            WHERE a.telegram_id = ?
-            ORDER BY a.created_at DESC
-            LIMIT 1
-            """,
-            (telegram_id,),
-        ).fetchone()
-
-    return application_from_row(row) if row else None
 
 
 def main_menu() -> ReplyKeyboardMarkup:
@@ -413,37 +391,89 @@ def admin_application_keyboard(application_id: int) -> InlineKeyboardMarkup:
 def pending_applications_keyboard(applications: Iterable[MembershipApplication]) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     for application in applications:
-        builder.button(
-            text=f"Заявка #{application.id} - {application.full_name}",
-            callback_data=f"view:{application.id}",
-        )
+        builder.button(text=f"Заявка #{application.id} - {application.company_name}", callback_data=f"view:{application.id}")
     builder.adjust(1)
     return builder.as_markup()
 
 
-def render_application_preview(user: UserProfile, activity: str, company_name: str) -> str:
+def contact_links_keyboard() -> InlineKeyboardMarkup | None:
+    buttons: list[list[InlineKeyboardButton]] = []
+    if ALLIANCE_WEBSITE:
+        buttons.append([InlineKeyboardButton(text="Официальный сайт", url=ALLIANCE_WEBSITE)])
+    if ALLIANCE_SOCIAL_URL:
+        buttons.append([InlineKeyboardButton(text="Социальные сети", url=ALLIANCE_SOCIAL_URL)])
+    return InlineKeyboardMarkup(inline_keyboard=buttons) if buttons else None
+
+
+def render_application_preview(user: UserProfile, activity: str, company_name: str, org_bin: str) -> str:
     return (
         "<b>Проверьте заявление</b>\n\n"
-        f"ФИО: {user.full_name}\n"
+        f"ФИО представителя: {user.full_name}\n"
         f"Телефон: {user.phone}\n"
-        f"ИИН: {user.iin}\n"
+        f"ИИН представителя: {user.iin}\n"
         f"Вид деятельности: {activity}\n"
-        f"Название компании: {company_name}"
+        f"Наименование организации: {company_name}\n"
+        f"БИН организации: {org_bin}"
     )
 
 
 def render_application_for_admin(application: MembershipApplication) -> str:
     return (
         f"<b>Заявка #{application.id}</b>\n\n"
-        f"ФИО: {application.full_name}\n"
+        f"ФИО представителя: {application.full_name}\n"
         f"Телефон: {application.phone}\n"
-        f"ИИН: {application.iin}\n"
+        f"ИИН представителя: {application.iin}\n"
         f"Деятельность при регистрации: {application.user_activity}\n"
         f"Деятельность в заявке: {application.application_activity}\n"
-        f"Компания: {application.company_name}\n"
+        f"Организация: {application.company_name}\n"
+        f"БИН организации: {application.org_bin}\n"
         f"Статус: {application.status}\n"
-        f"Дата подачи: {application.created_at}"
+        f"Дата подачи: {format_iso_date(application.created_at)}"
     )
+
+
+def render_approved_message(application: MembershipApplication) -> str:
+    contacts = []
+    if ALLIANCE_WEBSITE:
+        contacts.append(f"Сайт: {ALLIANCE_WEBSITE}")
+    if ALLIANCE_SOCIAL_URL:
+        contacts.append(f"Социальные сети: {ALLIANCE_SOCIAL_URL}")
+    if ALLIANCE_EMAIL:
+        contacts.append(f"Почта: {ALLIANCE_EMAIL}")
+    if ALLIANCE_PHONE:
+        contacts.append(f"Телефон: {ALLIANCE_PHONE}")
+    if ALLIANCE_BIN:
+        contacts.append(f"БИН Альянса: {ALLIANCE_BIN}")
+    if ALLIANCE_ADDRESS:
+        contacts.append(f"Адрес: {ALLIANCE_ADDRESS}")
+
+    contact_block = "\n\nКонтакты Альянса:\n" + "\n".join(contacts) if contacts else ""
+    return (
+        f"Уважаемые представители {application.company_name}!\n\n"
+        f"Ваша заявка на вступление в {ALLIANCE_NAME} одобрена.\n\n"
+        "Вы включены в состав членов Альянса.\n\n"
+        "Ваше свидетельство о членстве прикреплено к данному сообщению.\n\n"
+        f"Добро пожаловать в {ALLIANCE_NAME}!"
+        f"{contact_block}"
+    )
+
+
+def format_iso_date(value: str) -> str:
+    try:
+        return datetime.fromisoformat(value).strftime("%d.%m.%Y")
+    except ValueError:
+        return value
+
+
+def certificate_number(application_id: int, join_date: datetime) -> str:
+    return f"GAA-{join_date.year}-{application_id:04d}"
+
+
+def certificate_qr_link(number: str) -> str:
+    base_url = CERTIFICATE_VERIFY_BASE_URL.rstrip("/")
+    if base_url:
+        return f"{base_url}/certificate/{number}"
+    return f"certificate:{number}"
 
 
 def register_pdf_font() -> str:
@@ -459,59 +489,196 @@ def register_pdf_font() -> str:
     return "Helvetica"
 
 
+def draw_wrapped_text(
+    pdf: canvas.Canvas,
+    text: str,
+    x: float,
+    y: float,
+    max_width: float,
+    font_name: str,
+    font_size: int,
+    leading: int,
+    color=colors.HexColor("#0A2342"),
+    centered: bool = False,
+) -> float:
+    words = text.split()
+    lines: list[str] = []
+    current = ""
+    for word in words:
+        candidate = f"{current} {word}".strip()
+        if pdf.stringWidth(candidate, font_name, font_size) <= max_width:
+            current = candidate
+        else:
+            if current:
+                lines.append(current)
+            current = word
+    if current:
+        lines.append(current)
+
+    pdf.setFillColor(color)
+    pdf.setFont(font_name, font_size)
+    for line in lines:
+        if centered:
+            pdf.drawCentredString(x + max_width / 2, y, line)
+        else:
+            pdf.drawString(x, y, line)
+        y -= leading
+    return y
+
+
+def draw_qr(pdf: canvas.Canvas, value: str, x: float, y: float, size: float) -> None:
+    qr = QrCodeWidget(value)
+    bounds = qr.getBounds()
+    width = bounds[2] - bounds[0]
+    height = bounds[3] - bounds[1]
+    drawing = Drawing(size, size, transform=[size / width, 0, 0, size / height, 0, 0])
+    drawing.add(qr)
+    renderPDF.draw(drawing, pdf, x, y)
+
+
+def draw_pdf_background(pdf: canvas.Canvas, page_width: float, page_height: float) -> None:
+    navy = colors.HexColor("#08213F")
+    coral = colors.HexColor("#E85D4F")
+    light_coral = colors.HexColor("#F4B0A8")
+
+    pdf.setFillColor(colors.white)
+    pdf.rect(0, 0, page_width, page_height, fill=True, stroke=False)
+    pdf.setFillColor(navy)
+    pdf.line(0, page_height, 120, page_height)
+    pdf.rect(0, 0, 18, page_height, fill=True, stroke=False)
+    pdf.setFillColor(coral)
+    pdf.line(22, page_height - 2, 130, page_height - 64)
+    pdf.setFillColor(navy)
+    pdf.rect(page_width - 18, 0, 18, page_height, fill=True, stroke=False)
+    pdf.setFillColor(coral)
+    pdf.line(page_width - 24, 0, page_width - 135, 65)
+
+    pdf.setStrokeColor(light_coral)
+    pdf.setLineWidth(1.2)
+    pdf.roundRect(28, 22, page_width - 56, page_height - 44, 6, stroke=True, fill=False)
+    pdf.setLineWidth(0.5)
+    pdf.roundRect(34, 28, page_width - 68, page_height - 56, 4, stroke=True, fill=False)
+
+
 def generate_certificate(application: MembershipApplication, comment: str) -> Path:
     CERTIFICATES_DIR.mkdir(parents=True, exist_ok=True)
-    certificate_path = CERTIFICATES_DIR / f"certificate_{application.id}.pdf"
+    join_date = datetime.now()
+    number = certificate_number(application.id, join_date)
+    qr_link = certificate_qr_link(number)
+    certificate_path = CERTIFICATES_DIR / f"certificate_{number}.pdf"
     font_name = register_pdf_font()
 
-    doc = SimpleDocTemplate(
-        str(certificate_path),
-        pagesize=A4,
-        rightMargin=22 * mm,
-        leftMargin=22 * mm,
-        topMargin=24 * mm,
-        bottomMargin=22 * mm,
-    )
-    styles = getSampleStyleSheet()
-    styles["Title"].fontName = font_name
-    styles["Heading2"].fontName = font_name
-    styles["BodyText"].fontName = font_name
+    page_width, page_height = landscape(A4)
+    pdf = canvas.Canvas(str(certificate_path), pagesize=landscape(A4))
+    draw_pdf_background(pdf, page_width, page_height)
 
-    title = Paragraph("Свидетельство о вступлении", styles["Title"])
-    subtitle = Paragraph("Альянс женщин предпринимателей", styles["Heading2"])
-    body = Paragraph(
-        (
-            f"Настоящим подтверждается, что <b>{application.full_name}</b>, "
-            f"представляющая компанию <b>{application.company_name}</b>, "
-            "принята в состав Альянса женщин предпринимателей."
-        ),
-        styles["BodyText"],
-    )
+    navy = colors.HexColor("#08213F")
+    coral = colors.HexColor("#E85D4F")
+    muted = colors.HexColor("#53606F")
 
-    table = Table(
-        [
-            ["Номер заявления", f"#{application.id}"],
-            ["ИИН", application.iin],
-            ["Телефон", application.phone],
-            ["Вид деятельности", application.application_activity],
-            ["Дата одобрения", datetime.now().strftime("%d.%m.%Y")],
-            ["Комментарий", comment],
-        ],
-        colWidths=[55 * mm, 105 * mm],
-    )
-    table.setStyle(
-        TableStyle(
-            [
-                ("FONTNAME", (0, 0), (-1, -1), font_name),
-                ("BACKGROUND", (0, 0), (0, -1), colors.HexColor("#F2F2F2")),
-                ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#BDBDBD")),
-                ("VALIGN", (0, 0), (-1, -1), "TOP"),
-                ("PADDING", (0, 0), (-1, -1), 8),
-            ]
-        )
-    )
+    if LOGO_PATH.exists():
+        pdf.drawImage(ImageReader(str(LOGO_PATH)), 118, page_height - 116, width=160, height=95, preserveAspectRatio=True, mask="auto")
+    else:
+        pdf.setFillColor(coral)
+        pdf.circle(142, page_height - 68, 20, fill=True, stroke=False)
+        pdf.setFillColor(navy)
+        pdf.setFont(font_name, 16)
+        pdf.drawString(172, page_height - 66, ALLIANCE_NAME)
 
-    doc.build([title, Spacer(1, 8 * mm), subtitle, Spacer(1, 12 * mm), body, Spacer(1, 10 * mm), table])
+    pdf.setFillColor(navy)
+    pdf.setFont(font_name, 38)
+    pdf.drawCentredString(330, page_height - 185, "СВИДЕТЕЛЬСТВО")
+    pdf.setFillColor(coral)
+    pdf.setFont(font_name, 22)
+    pdf.drawCentredString(330, page_height - 220, "О ЧЛЕНСТВЕ")
+
+    pdf.setStrokeColor(colors.HexColor("#F0B5AD"))
+    pdf.line(214, page_height - 240, 446, page_height - 240)
+
+    y = page_height - 278
+    y = draw_wrapped_text(pdf, "Настоящим подтверждается, что", 105, y, 450, font_name, 12, 18, muted, centered=True)
+    y -= 8
+    company_font_size = 24 if len(application.company_name) <= 45 else 18
+    y = draw_wrapped_text(pdf, application.company_name, 105, y, 450, font_name, company_font_size, 28, navy, centered=True)
+    y -= 4
+    pdf.setFillColor(navy)
+    pdf.setFont(font_name, 13)
+    pdf.drawCentredString(330, y, f"БИН: {application.org_bin}")
+    y -= 34
+    y = draw_wrapped_text(
+        pdf,
+        f"на основании электронного заявления о вступлении от {format_iso_date(application.created_at)} "
+        f"и решения {ALLIANCE_NAME} принят(а) в состав членов",
+        124,
+        y,
+        410,
+        font_name,
+        12,
+        17,
+        navy,
+        centered=True,
+    )
+    y -= 2
+    pdf.setFillColor(coral)
+    pdf.setFont(font_name, 14)
+    pdf.drawCentredString(330, y, ALLIANCE_NAME)
+
+    pdf.setFillColor(navy)
+    pdf.setFont(font_name, 10)
+    pdf.drawString(92, 142, "Председатель")
+    pdf.drawString(92, 128, "Гражданского Альянса")
+    pdf.drawString(92, 114, "города Астаны")
+    pdf.setStrokeColor(navy)
+    pdf.setLineWidth(1)
+    pdf.line(92, 92, 260, 92)
+    pdf.setFillColor(navy)
+    pdf.setFont(font_name, 10)
+    pdf.drawString(92, 74, CHAIRMAN_NAME)
+    pdf.setFont(font_name, 9)
+    pdf.drawCentredString(418, 86, "М.П.")
+    pdf.setStrokeColor(colors.HexColor("#F0B5AD"))
+    pdf.line(160, 48, 520, 48)
+    pdf.setFillColor(navy)
+    pdf.setFont(font_name, 9)
+    pdf.drawCentredString(340, 30, "ВМЕСТЕ РАЗВИВАЕМ ГРАЖДАНСКОЕ ОБЩЕСТВО!")
+
+    side_x = 610
+    pdf.setStrokeColor(colors.HexColor("#F0B5AD"))
+    pdf.line(side_x - 24, 128, side_x - 24, page_height - 185)
+
+    side_items = [
+        ("Дата вступления", join_date.strftime("%d.%m.%Y")),
+        ("Номер свидетельства", number),
+        ("Статус", "Член Гражданского\nАльянса города Астаны"),
+        ("Дата выдачи", join_date.strftime("%d.%m.%Y")),
+    ]
+    side_y = page_height - 218
+    for title, value in side_items:
+        pdf.setFillColor(navy)
+        pdf.setFont(font_name, 11)
+        pdf.drawString(side_x, side_y, title)
+        pdf.setFillColor(coral)
+        pdf.setFont(font_name, 11)
+        value_y = side_y - 17
+        for line in value.split("\n"):
+            pdf.drawString(side_x, value_y, line)
+            value_y -= 14
+        pdf.setStrokeColor(colors.HexColor("#F0B5AD"))
+        pdf.line(side_x, value_y - 8, side_x + 165, value_y - 8)
+        side_y = value_y - 26
+
+    draw_qr(pdf, qr_link, side_x + 10, 102, 82)
+    pdf.setFillColor(navy)
+    pdf.setFont(font_name, 8)
+    pdf.drawString(side_x, 82, "Проверка свидетельства")
+    pdf.drawString(side_x, 70, "на официальном сайте")
+
+    if comment:
+        pdf.setFillColor(muted)
+        pdf.setFont(font_name, 7)
+        pdf.drawString(42, 18, f"Комментарий администратора: {comment[:140]}")
+
+    pdf.save()
     return certificate_path
 
 
@@ -536,7 +703,7 @@ async def notify_admins(bot: Bot, application_id: int) -> None:
 async def start(message: Message, state: FSMContext) -> None:
     await state.clear()
     await message.answer(
-        "Здравствуйте! Это бот Альянса женщин предпринимателей. Выберите действие:",
+        f"Здравствуйте! Это бот {ALLIANCE_NAME}. Выберите действие:",
         reply_markup=main_menu(),
     )
 
@@ -660,22 +827,34 @@ async def application_identity_rejected(message: Message, state: FSMContext) -> 
 async def application_activity(message: Message, state: FSMContext) -> None:
     await state.update_data(application_activity=message.text.strip())
     await state.set_state(Application.waiting_for_company)
-    await message.answer("Введите название компании.")
+    await message.answer("Введите полное наименование организации.")
 
 
 @router.message(Application.waiting_for_company)
 async def application_company(message: Message, state: FSMContext) -> None:
+    await state.update_data(company_name=message.text.strip())
+    await state.set_state(Application.waiting_for_bin)
+    await message.answer("Введите БИН организации.")
+
+
+@router.message(Application.waiting_for_bin)
+async def application_bin(message: Message, state: FSMContext) -> None:
     profile = get_user(message.from_user.id)
     if profile is None:
         await state.clear()
         await message.answer("Регистрация не найдена. Пройдите регистрацию.", reply_markup=main_menu())
         return
 
-    await state.update_data(company_name=message.text.strip())
+    org_bin = message.text.strip()
+    if not org_bin.isdigit() or len(org_bin) != 12:
+        await message.answer("БИН должен состоять из 12 цифр. Введите БИН еще раз.")
+        return
+
+    await state.update_data(org_bin=org_bin)
     data = await state.get_data()
     await state.set_state(Application.preview)
     await message.answer(
-        render_application_preview(profile, data["application_activity"], data["company_name"]),
+        render_application_preview(profile, data["application_activity"], data["company_name"], data["org_bin"]),
         reply_markup=application_preview_keyboard(),
     )
 
@@ -693,6 +872,7 @@ async def application_submit(message: Message, state: FSMContext, bot: Bot) -> N
         telegram_id=message.from_user.id,
         activity=data["application_activity"],
         company_name=data["company_name"],
+        org_bin=data["org_bin"],
     )
     await state.clear()
     await message.answer(
@@ -718,7 +898,7 @@ async def admin_panel(message: Message) -> None:
 
 @router.message(F.text == "Новости")
 async def news(message: Message) -> None:
-    await message.answer("Раздел новостей готов к подключению. Здесь можно публиковать объявления альянса.")
+    await message.answer("Раздел новостей готов к подключению. Здесь можно публиковать объявления Альянса.")
 
 
 @router.message(F.text == "Мой статус")
@@ -801,12 +981,13 @@ async def admin_approve_finish(message: Message, state: FSMContext, bot: Bot) ->
     await message.answer(f"Заявка #{application_id} одобрена.", reply_markup=main_menu())
     await bot.send_message(
         application.telegram_id,
-        f"Ваше заявление №{application_id} одобрено.\nКомментарий: {comment}",
+        render_approved_message(application),
+        reply_markup=contact_links_keyboard(),
     )
     await bot.send_document(
         application.telegram_id,
         FSInputFile(certificate_path),
-        caption="Ваше свидетельство о вступлении.",
+        caption="Ваше свидетельство о членстве.",
     )
 
 
@@ -858,8 +1039,8 @@ async def main() -> None:
     if not BOT_TOKEN:
         raise RuntimeError("BOT_TOKEN is not set. Copy .env.example to .env and fill BOT_TOKEN.")
 
-    init_db()
     logging.basicConfig(level=logging.INFO)
+    init_db()
     bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     dispatcher = Dispatcher(storage=MemoryStorage())
     dispatcher.include_router(router)
