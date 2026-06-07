@@ -46,6 +46,7 @@ DATABASE_PATH = os.getenv("DATABASE_PATH", "alliance_bot.sqlite3")
 CERTIFICATES_DIR = Path(os.getenv("CERTIFICATES_DIR", "certificates"))
 ASSETS_DIR = Path("assets")
 LOGO_PATH = ASSETS_DIR / "alliance-logo.jpeg"
+PDF_FONT_PATH = ASSETS_DIR / "app-font.ttf"
 
 ALLIANCE_NAME = os.getenv("ALLIANCE_NAME", "Гражданский Альянс города Астаны")
 ALLIANCE_BIN = os.getenv("ALLIANCE_BIN", "")
@@ -478,6 +479,7 @@ def certificate_qr_link(number: str) -> str:
 
 def register_pdf_font() -> str:
     font_candidates = [
+        PDF_FONT_PATH,
         Path("C:/Windows/Fonts/arial.ttf"),
         Path("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"),
         Path("/Library/Fonts/Arial.ttf"),
