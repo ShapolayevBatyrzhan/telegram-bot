@@ -464,6 +464,10 @@ def registration_webapp_keyboard() -> InlineKeyboardMarkup:
     )
 
 
+def has_valid_registration_webapp_url() -> bool:
+    return REGISTRATION_WEBAPP_URL.startswith("https://")
+
+
 def guest_menu() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
@@ -921,8 +925,16 @@ async def registration_start(message: Message, state: FSMContext) -> None:
     await message.answer("Нажмите кнопку ниже, чтобы поделиться номером телефона.", reply_markup=phone_keyboard())
 
 
-@router.message(Registration.waiting_for_phone, F.contact)
+@router.message(F.contact)
 async def registration_phone(message: Message, state: FSMContext) -> None:
+    if get_user(message.from_user.id) is not None:
+        await state.clear()
+        await message.answer(
+            "Вы уже зарегистрированы.",
+            reply_markup=main_menu(message.from_user.id),
+        )
+        return
+
     if message.contact.user_id != message.from_user.id:
         await message.answer("Пожалуйста, отправьте именно свой номер через кнопку Telegram.")
         return
@@ -936,14 +948,26 @@ async def registration_phone(message: Message, state: FSMContext) -> None:
         )
         return
 
-    if REGISTRATION_WEBAPP_URL:
+    if has_valid_registration_webapp_url():
         save_pending_registration(message.from_user.id, message.contact.phone_number)
         await state.clear()
-        await message.answer(
-            "Номер подтвержден. Нажмите кнопку ниже и заполните форму регистрации.",
-            reply_markup=registration_webapp_keyboard(),
-        )
+        try:
+            await message.answer(
+                "Номер подтвержден. Нажмите кнопку ниже и заполните форму регистрации.",
+                reply_markup=registration_webapp_keyboard(),
+            )
+        except Exception:
+            logging.exception("Could not show Mini App registration button")
+            await state.update_data(phone=message.contact.phone_number)
+            await state.set_state(Registration.waiting_for_full_name)
+            await message.answer(
+                "Номер подтвержден, но Mini App временно недоступна. Введите ФИО полностью.",
+                reply_markup=ReplyKeyboardRemove(),
+            )
         return
+
+    if REGISTRATION_WEBAPP_URL:
+        logging.warning("REGISTRATION_WEBAPP_URL must start with https://")
 
     await state.update_data(phone=message.contact.phone_number)
     await state.set_state(Registration.waiting_for_full_name)
