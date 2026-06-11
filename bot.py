@@ -461,6 +461,7 @@ def registration_webapp_keyboard() -> InlineKeyboardMarkup:
                 )
             ],
             [InlineKeyboardButton(text="Открыть форму в браузере", url=REGISTRATION_WEBAPP_URL)],
+            [InlineKeyboardButton(text="Отменить регистрацию", callback_data="cancel_registration")],
         ]
     )
 
@@ -522,15 +523,28 @@ def main_menu(telegram_id: int | None = None) -> ReplyKeyboardMarkup:
 
 def phone_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
-        keyboard=[[KeyboardButton(text="Поделиться номером", request_contact=True)]],
+        keyboard=[
+            [KeyboardButton(text="Поделиться номером", request_contact=True)],
+            [KeyboardButton(text="Отменить")],
+        ],
         resize_keyboard=True,
         one_time_keyboard=True,
     )
 
 
+def registration_navigation_keyboard() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[[KeyboardButton(text="Назад"), KeyboardButton(text="Отменить")]],
+        resize_keyboard=True,
+    )
+
+
 def yes_no_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
-        keyboard=[[KeyboardButton(text="Да"), KeyboardButton(text="Нет")]],
+        keyboard=[
+            [KeyboardButton(text="Да"), KeyboardButton(text="Нет")],
+            [KeyboardButton(text="Отменить")],
+        ],
         resize_keyboard=True,
         one_time_keyboard=True,
     )
@@ -538,7 +552,10 @@ def yes_no_keyboard() -> ReplyKeyboardMarkup:
 
 def application_preview_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
-        keyboard=[[KeyboardButton(text="Подать"), KeyboardButton(text="Отредактировать")]],
+        keyboard=[
+            [KeyboardButton(text="Подать"), KeyboardButton(text="Отредактировать")],
+            [KeyboardButton(text="Отменить")],
+        ],
         resize_keyboard=True,
         one_time_keyboard=True,
     )
@@ -921,6 +938,61 @@ async def show_mini_app_status(message: Message) -> None:
     )
 
 
+@router.callback_query(F.data == "cancel_registration")
+async def cancel_registration_callback(callback: CallbackQuery, state: FSMContext) -> None:
+    delete_pending_registration(callback.from_user.id)
+    await state.clear()
+    await callback.message.answer(
+        "Регистрация отменена.",
+        reply_markup=main_menu(callback.from_user.id),
+    )
+    await callback.answer()
+
+
+@router.message(F.text == "Отменить")
+async def cancel_current_flow(message: Message, state: FSMContext) -> None:
+    delete_pending_registration(message.from_user.id)
+    await state.clear()
+    await message.answer(
+        "Действие отменено.",
+        reply_markup=main_menu(message.from_user.id),
+    )
+
+
+@router.message(F.text == "Назад")
+async def go_back(message: Message, state: FSMContext) -> None:
+    current_state = await state.get_state()
+
+    if current_state == Registration.waiting_for_full_name.state:
+        await state.set_state(Registration.waiting_for_phone)
+        await message.answer("Подтвердите номер телефона.", reply_markup=phone_keyboard())
+        return
+    if current_state == Registration.waiting_for_iin.state:
+        await state.set_state(Registration.waiting_for_full_name)
+        await message.answer("Введите ФИО полностью.", reply_markup=registration_navigation_keyboard())
+        return
+    if current_state == Registration.waiting_for_activity.state:
+        await state.set_state(Registration.waiting_for_iin)
+        await message.answer("Введите ИИН.", reply_markup=registration_navigation_keyboard())
+        return
+    if current_state == Application.waiting_for_activity.state:
+        await state.set_state(Application.confirming_identity)
+        profile = get_user(message.from_user.id)
+        if profile:
+            await message.answer(f"Это вы?\n\n{profile.full_name}\n{profile.phone}", reply_markup=yes_no_keyboard())
+        return
+    if current_state == Application.waiting_for_company.state:
+        await state.set_state(Application.waiting_for_activity)
+        await message.answer("Укажите вид деятельности для заявления.", reply_markup=registration_navigation_keyboard())
+        return
+    if current_state == Application.waiting_for_bin.state:
+        await state.set_state(Application.waiting_for_company)
+        await message.answer("Введите полное наименование организации.", reply_markup=registration_navigation_keyboard())
+        return
+
+    await message.answer("Предыдущего шага нет. Можно отменить действие.", reply_markup=main_menu(message.from_user.id))
+
+
 @router.message(F.text == "Вход")
 async def login(message: Message) -> None:
     profile = get_user(message.from_user.id)
@@ -986,7 +1058,7 @@ async def registration_phone(message: Message, state: FSMContext) -> None:
             await state.set_state(Registration.waiting_for_full_name)
             await message.answer(
                 "Номер подтвержден, но Mini App временно недоступна. Введите ФИО полностью.",
-                reply_markup=ReplyKeyboardRemove(),
+                reply_markup=registration_navigation_keyboard(),
             )
         return
 
@@ -995,7 +1067,7 @@ async def registration_phone(message: Message, state: FSMContext) -> None:
 
     await state.update_data(phone=message.contact.phone_number)
     await state.set_state(Registration.waiting_for_full_name)
-    await message.answer("Введите ФИО полностью.", reply_markup=ReplyKeyboardRemove())
+    await message.answer("Введите ФИО полностью.", reply_markup=registration_navigation_keyboard())
 
 
 @router.message(Registration.waiting_for_phone)
@@ -1007,7 +1079,7 @@ async def registration_phone_invalid(message: Message) -> None:
 async def registration_full_name(message: Message, state: FSMContext) -> None:
     await state.update_data(full_name=message.text.strip())
     await state.set_state(Registration.waiting_for_iin)
-    await message.answer("Введите ИИН.")
+    await message.answer("Введите ИИН.", reply_markup=registration_navigation_keyboard())
 
 
 @router.message(Registration.waiting_for_iin)
@@ -1019,7 +1091,7 @@ async def registration_iin(message: Message, state: FSMContext) -> None:
 
     await state.update_data(iin=iin)
     await state.set_state(Registration.waiting_for_activity)
-    await message.answer("Чем вы занимаетесь?")
+    await message.answer("Чем вы занимаетесь?", reply_markup=registration_navigation_keyboard())
 
 
 @router.message(Registration.waiting_for_activity)
@@ -1051,7 +1123,7 @@ async def application_start(message: Message, state: FSMContext) -> None:
 @router.message(Application.confirming_identity, F.text.casefold() == "да")
 async def application_identity_confirmed(message: Message, state: FSMContext) -> None:
     await state.set_state(Application.waiting_for_activity)
-    await message.answer("Укажите вид деятельности для заявления.")
+    await message.answer("Укажите вид деятельности для заявления.", reply_markup=registration_navigation_keyboard())
 
 
 @router.message(Application.confirming_identity, F.text.casefold() == "нет")
@@ -1064,14 +1136,14 @@ async def application_identity_rejected(message: Message, state: FSMContext) -> 
 async def application_activity(message: Message, state: FSMContext) -> None:
     await state.update_data(application_activity=message.text.strip())
     await state.set_state(Application.waiting_for_company)
-    await message.answer("Введите полное наименование организации.")
+    await message.answer("Введите полное наименование организации.", reply_markup=registration_navigation_keyboard())
 
 
 @router.message(Application.waiting_for_company)
 async def application_company(message: Message, state: FSMContext) -> None:
     await state.update_data(company_name=message.text.strip())
     await state.set_state(Application.waiting_for_bin)
-    await message.answer("Введите БИН организации.")
+    await message.answer("Введите БИН организации.", reply_markup=registration_navigation_keyboard())
 
 
 @router.message(Application.waiting_for_bin)
@@ -1099,7 +1171,10 @@ async def application_bin(message: Message, state: FSMContext) -> None:
 @router.message(Application.preview, F.text == "Отредактировать")
 async def application_edit(message: Message, state: FSMContext) -> None:
     await state.set_state(Application.waiting_for_activity)
-    await message.answer("Хорошо, начнем правку. Укажите вид деятельности для заявления.")
+    await message.answer(
+        "Хорошо, начнем правку. Укажите вид деятельности для заявления.",
+        reply_markup=registration_navigation_keyboard(),
+    )
 
 
 @router.message(Application.preview, F.text == "Подать")
@@ -1364,6 +1439,23 @@ async def mini_app_register(request: web.Request) -> web.Response:
     return web.json_response({"ok": True})
 
 
+async def mini_app_cancel(request: web.Request) -> web.Response:
+    try:
+        payload = await request.json()
+    except json.JSONDecodeError:
+        return web.json_response({"ok": False, "error": "Некорректные данные."}, status=400)
+
+    telegram_id = validate_telegram_init_data(str(payload.get("initData", "")))
+    if telegram_id is None:
+        return web.json_response(
+            {"ok": False, "error": "Откройте форму через кнопку регистрации внутри Telegram."},
+            status=401,
+        )
+
+    delete_pending_registration(telegram_id)
+    return web.json_response({"ok": True})
+
+
 def create_web_app(bot: Bot) -> web.Application:
     app = web.Application()
     app["bot"] = bot
@@ -1372,6 +1464,7 @@ def create_web_app(bot: Bot) -> web.Application:
     app.router.add_get("/register", mini_app_page)
     app.router.add_get("/assets/alliance-logo.jpeg", mini_app_logo)
     app.router.add_post("/api/register", mini_app_register)
+    app.router.add_post("/api/cancel-registration", mini_app_cancel)
     return app
 
 

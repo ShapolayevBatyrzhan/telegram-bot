@@ -129,6 +129,12 @@
       cursor: wait;
     }
 
+    .cancel-button {
+      background: transparent;
+      color: var(--navy);
+      border: 1px solid var(--line);
+    }
+
     .message {
       display: none;
       padding: 12px 14px;
@@ -183,6 +189,7 @@
 
       <div id="message" class="message" role="status"></div>
       <button id="submit-button" type="submit">Завершить регистрацию</button>
+      <button id="cancel-button" class="cancel-button" type="button">Отменить регистрацию</button>
     </form>
   </main>
 
@@ -194,6 +201,10 @@
     const form = document.getElementById("registration-form");
     const message = document.getElementById("message");
     const button = document.getElementById("submit-button");
+    const cancelButton = document.getElementById("cancel-button");
+
+    telegram?.BackButton.show();
+    telegram?.BackButton.onClick(() => telegram.close());
 
     function showMessage(text, type) {
       message.textContent = text;
@@ -227,6 +238,25 @@
       } catch (error) {
         showMessage(error.message, "error");
         button.disabled = false;
+      }
+    });
+
+    cancelButton.addEventListener("click", async () => {
+      cancelButton.disabled = true;
+      try {
+        const response = await fetch("/api/cancel-registration", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ initData: telegram?.initData || "" })
+        });
+        const result = await response.json();
+        if (!response.ok || !result.ok) {
+          throw new Error(result.error || "Не удалось отменить регистрацию.");
+        }
+        telegram?.close();
+      } catch (error) {
+        showMessage(error.message, "error");
+        cancelButton.disabled = false;
       }
     });
   </script>
