@@ -24,6 +24,7 @@ from aiogram.types import (
     Message,
     ReplyKeyboardMarkup,
     ReplyKeyboardRemove,
+    WebAppInfo,
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from dotenv import load_dotenv
@@ -41,9 +42,22 @@ from reportlab.pdfgen import canvas
 
 load_dotenv()
 
+
+def normalize_phone(phone: str) -> str:
+    return "".join(character for character in phone if character.isdigit())
+
+
+def default_database_path() -> str:
+    return "/data/alliance_bot.sqlite3" if Path("/data").exists() else "alliance_bot.sqlite3"
+
+
+def default_certificates_dir() -> str:
+    return "/data/certificates" if Path("/data").exists() else "certificates"
+
+
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
-DATABASE_PATH = os.getenv("DATABASE_PATH", "alliance_bot.sqlite3")
-CERTIFICATES_DIR = Path(os.getenv("CERTIFICATES_DIR", "certificates"))
+DATABASE_PATH = os.getenv("DATABASE_PATH") or default_database_path()
+CERTIFICATES_DIR = Path(os.getenv("CERTIFICATES_DIR") or default_certificates_dir())
 ASSETS_DIR = Path("assets")
 LOGO_PATH = ASSETS_DIR / "alliance-logo.jpeg"
 PDF_FONT_PATH = ASSETS_DIR / "app-font.ttf"
@@ -56,6 +70,7 @@ ALLIANCE_ADDRESS = os.getenv("ALLIANCE_ADDRESS", "")
 ALLIANCE_WEBSITE = os.getenv("ALLIANCE_WEBSITE", "")
 ALLIANCE_SOCIAL_URL = os.getenv("ALLIANCE_SOCIAL_URL", "")
 CERTIFICATE_VERIFY_BASE_URL = os.getenv("CERTIFICATE_VERIFY_BASE_URL", ALLIANCE_WEBSITE)
+REGISTRATION_WEBAPP_URL = os.getenv("REGISTRATION_WEBAPP_URL", "")
 CHAIRMAN_NAME = os.getenv("CHAIRMAN_NAME", "Утеуова Аяжан Дюсембаевна")
 CHAIRMAN_POSITION = os.getenv("CHAIRMAN_POSITION", "Председатель Гражданского Альянса города Астаны")
 
@@ -63,6 +78,11 @@ ADMIN_IDS = {
     int(admin_id.strip())
     for admin_id in os.getenv("ADMIN_IDS", "").split(",")
     if admin_id.strip().isdigit()
+}
+ADMIN_PHONES = {
+    normalize_phone(phone)
+    for phone in os.getenv("ADMIN_PHONES", "").split(",")
+    if normalize_phone(phone)
 }
 
 router = Router()
@@ -110,11 +130,9 @@ class MembershipApplication:
     org_bin: str
     status: str
     admin_comment: str | None
+    certificate_path: str | None
     created_at: str
-
-
-def normalize_phone(phone: str) -> str:
-    return "".join(character for character in phone if character.isdigit())
+    reviewed_at: str | None
 
 
 def connect_db() -> sqlite3.Connection:
@@ -161,6 +179,10 @@ def init_db() -> None:
         app_columns = {row["name"] for row in connection.execute("PRAGMA table_info(applications)").fetchall()}
         if "org_bin" not in app_columns:
             connection.execute("ALTER TABLE applications ADD COLUMN org_bin TEXT NOT NULL DEFAULT ''")
+        if "certificate_path" not in app_columns:
+            connection.execute("ALTER TABLE applications ADD COLUMN certificate_path TEXT")
+        if "reviewed_at" not in app_columns:
+            connection.execute("ALTER TABLE applications ADD COLUMN reviewed_at TEXT")
 
         users_without_phone_key = connection.execute(
             "SELECT telegram_id, phone FROM users WHERE phone_normalized IS NULL OR phone_normalized = ''"
@@ -207,6 +229,16 @@ def upsert_user(telegram_id: int, phone: str, full_name: str, iin: str, activity
         connection.commit()
 
 
+def user_from_row(row: sqlite3.Row) -> UserProfile:
+    return UserProfile(
+        telegram_id=row["telegram_id"],
+        phone=row["phone"],
+        full_name=row["full_name"],
+        iin=row["iin"],
+        activity=row["activity"],
+    )
+
+
 def get_user(telegram_id: int) -> UserProfile | None:
     with closing(connect_db()) as connection:
         row = connection.execute(
@@ -227,16 +259,6 @@ def get_user_by_phone(phone: str) -> UserProfile | None:
             (normalize_phone(phone),),
         ).fetchone()
     return user_from_row(row) if row else None
-
-
-def user_from_row(row: sqlite3.Row) -> UserProfile:
-    return UserProfile(
-        telegram_id=row["telegram_id"],
-        phone=row["phone"],
-        full_name=row["full_name"],
-        iin=row["iin"],
-        activity=row["activity"],
-    )
 
 
 def create_application(telegram_id: int, activity: str, company_name: str, org_bin: str) -> int:
@@ -266,7 +288,9 @@ def application_select_sql(where_clause: str) -> str:
             a.org_bin,
             a.status,
             a.admin_comment,
-            a.created_at
+            a.certificate_path,
+            a.created_at,
+            a.reviewed_at
         FROM applications a
         JOIN users u ON u.telegram_id = a.telegram_id
         {where_clause}
@@ -286,16 +310,15 @@ def application_from_row(row: sqlite3.Row) -> MembershipApplication:
         org_bin=row["org_bin"],
         status=row["status"],
         admin_comment=row["admin_comment"],
+        certificate_path=row["certificate_path"],
         created_at=row["created_at"],
+        reviewed_at=row["reviewed_at"],
     )
 
 
 def get_application(application_id: int) -> MembershipApplication | None:
     with closing(connect_db()) as connection:
-        row = connection.execute(
-            application_select_sql("WHERE a.id = ?"),
-            (application_id,),
-        ).fetchone()
+        row = connection.execute(application_select_sql("WHERE a.id = ?"), (application_id,)).fetchone()
     return application_from_row(row) if row else None
 
 
@@ -303,6 +326,17 @@ def list_pending_applications() -> list[MembershipApplication]:
     with closing(connect_db()) as connection:
         rows = connection.execute(
             application_select_sql("WHERE a.status = 'pending' ORDER BY a.created_at ASC")
+        ).fetchall()
+    return [application_from_row(row) for row in rows]
+
+
+def list_issued_certificates(limit: int = 30) -> list[MembershipApplication]:
+    with closing(connect_db()) as connection:
+        rows = connection.execute(
+            application_select_sql(
+                "WHERE a.status = 'approved' ORDER BY COALESCE(a.reviewed_at, a.created_at) DESC LIMIT ?"
+            ),
+            (limit,),
         ).fetchall()
     return [application_from_row(row) for row in rows]
 
@@ -342,16 +376,63 @@ def update_application_status(
         connection.commit()
 
 
-def main_menu() -> ReplyKeyboardMarkup:
+def is_admin(telegram_id: int) -> bool:
+    if telegram_id in ADMIN_IDS:
+        return True
+
+    profile = get_user(telegram_id)
+    if profile is None:
+        return False
+
+    return normalize_phone(profile.phone) in ADMIN_PHONES
+
+
+def registration_button() -> KeyboardButton:
+    if REGISTRATION_WEBAPP_URL:
+        return KeyboardButton(text="Регистрация", web_app=WebAppInfo(url=REGISTRATION_WEBAPP_URL))
+    return KeyboardButton(text="Регистрация")
+
+
+def guest_menu() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text="Вход"), KeyboardButton(text="Регистрация")],
-            [KeyboardButton(text="Заявление на вступление"), KeyboardButton(text="Новости")],
-            [KeyboardButton(text="Администратор"), KeyboardButton(text="Мой статус")],
+            [KeyboardButton(text="Вход"), registration_button()],
+            [KeyboardButton(text="Новости")],
         ],
         resize_keyboard=True,
         input_field_placeholder="Выберите действие",
     )
+
+
+def user_menu() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="Заявление на вступление")],
+            [KeyboardButton(text="Новости"), KeyboardButton(text="Мой статус")],
+        ],
+        resize_keyboard=True,
+        input_field_placeholder="Выберите действие",
+    )
+
+
+def admin_menu() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="Новые заявления"), KeyboardButton(text="Реестр сертификатов")],
+            [KeyboardButton(text="Заявление на вступление")],
+            [KeyboardButton(text="Новости"), KeyboardButton(text="Мой статус")],
+        ],
+        resize_keyboard=True,
+        input_field_placeholder="Панель администратора",
+    )
+
+
+def main_menu(telegram_id: int | None = None) -> ReplyKeyboardMarkup:
+    if telegram_id is not None and is_admin(telegram_id):
+        return admin_menu()
+    if telegram_id is not None and get_user(telegram_id):
+        return user_menu()
+    return guest_menu()
 
 
 def phone_keyboard() -> ReplyKeyboardMarkup:
@@ -406,6 +487,40 @@ def contact_links_keyboard() -> InlineKeyboardMarkup | None:
     return InlineKeyboardMarkup(inline_keyboard=buttons) if buttons else None
 
 
+def format_iso_date(value: str | None) -> str:
+    if not value:
+        return ""
+    try:
+        return datetime.fromisoformat(value).strftime("%d.%m.%Y")
+    except ValueError:
+        return value
+
+
+def parse_iso_datetime(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError:
+        return None
+
+
+def certificate_number(application_id: int, join_date: datetime) -> str:
+    return f"GAA-{join_date.year}-{application_id:04d}"
+
+
+def certificate_number_for_application(application: MembershipApplication) -> str:
+    date = parse_iso_datetime(application.reviewed_at) or parse_iso_datetime(application.created_at) or datetime.now()
+    return certificate_number(application.id, date)
+
+
+def certificate_qr_link(number: str) -> str:
+    base_url = CERTIFICATE_VERIFY_BASE_URL.rstrip("/")
+    if base_url:
+        return f"{base_url}/certificate/{number}"
+    return f"certificate:{number}"
+
+
 def render_application_preview(user: UserProfile, activity: str, company_name: str, org_bin: str) -> str:
     return (
         "<b>Проверьте заявление</b>\n\n"
@@ -433,6 +548,25 @@ def render_application_for_admin(application: MembershipApplication) -> str:
     )
 
 
+def render_certificate_registry(applications: list[MembershipApplication]) -> str:
+    if not applications:
+        return "Выданных сертификатов пока нет."
+
+    lines = ["<b>Реестр выданных сертификатов</b>"]
+    for application in applications:
+        number = certificate_number_for_application(application)
+        issued_at = format_iso_date(application.reviewed_at or application.created_at)
+        comment = f"\nКомментарий: {application.admin_comment}" if application.admin_comment else ""
+        lines.append(
+            f"\n<b>{number}</b>\n"
+            f"Организация: {application.company_name}\n"
+            f"БИН: {application.org_bin}\n"
+            f"Выдан: {issued_at}\n"
+            f"Заявка: #{application.id}{comment}"
+        )
+    return "\n".join(lines)
+
+
 def render_approved_message(application: MembershipApplication) -> str:
     contacts = []
     if ALLIANCE_WEBSITE:
@@ -457,24 +591,6 @@ def render_approved_message(application: MembershipApplication) -> str:
         f"Добро пожаловать в {ALLIANCE_NAME}!"
         f"{contact_block}"
     )
-
-
-def format_iso_date(value: str) -> str:
-    try:
-        return datetime.fromisoformat(value).strftime("%d.%m.%Y")
-    except ValueError:
-        return value
-
-
-def certificate_number(application_id: int, join_date: datetime) -> str:
-    return f"GAA-{join_date.year}-{application_id:04d}"
-
-
-def certificate_qr_link(number: str) -> str:
-    base_url = CERTIFICATE_VERIFY_BASE_URL.rstrip("/")
-    if base_url:
-        return f"{base_url}/certificate/{number}"
-    return f"certificate:{number}"
 
 
 def register_pdf_font() -> str:
@@ -546,13 +662,12 @@ def draw_pdf_background(pdf: canvas.Canvas, page_width: float, page_height: floa
     pdf.setFillColor(colors.white)
     pdf.rect(0, 0, page_width, page_height, fill=True, stroke=False)
     pdf.setFillColor(navy)
-    pdf.line(0, page_height, 120, page_height)
     pdf.rect(0, 0, 18, page_height, fill=True, stroke=False)
-    pdf.setFillColor(coral)
-    pdf.line(22, page_height - 2, 130, page_height - 64)
-    pdf.setFillColor(navy)
     pdf.rect(page_width - 18, 0, 18, page_height, fill=True, stroke=False)
-    pdf.setFillColor(coral)
+
+    pdf.setStrokeColor(coral)
+    pdf.setLineWidth(1.5)
+    pdf.line(22, page_height - 2, 130, page_height - 64)
     pdf.line(page_width - 24, 0, page_width - 135, 65)
 
     pdf.setStrokeColor(light_coral)
@@ -580,12 +695,6 @@ def generate_certificate(application: MembershipApplication, comment: str) -> Pa
 
     if LOGO_PATH.exists():
         pdf.drawImage(ImageReader(str(LOGO_PATH)), 118, page_height - 116, width=160, height=95, preserveAspectRatio=True, mask="auto")
-    else:
-        pdf.setFillColor(coral)
-        pdf.circle(142, page_height - 68, 20, fill=True, stroke=False)
-        pdf.setFillColor(navy)
-        pdf.setFont(font_name, 16)
-        pdf.drawString(172, page_height - 66, ALLIANCE_NAME)
 
     pdf.setFillColor(navy)
     pdf.setFont(font_name, 38)
@@ -624,6 +733,10 @@ def generate_certificate(application: MembershipApplication, comment: str) -> Pa
     pdf.setFillColor(coral)
     pdf.setFont(font_name, 14)
     pdf.drawCentredString(330, y, ALLIANCE_NAME)
+
+    if comment:
+        y -= 28
+        draw_wrapped_text(pdf, f"Комментарий: {comment}", 124, y, 410, font_name, 10, 14, muted, centered=True)
 
     pdf.setFillColor(navy)
     pdf.setFont(font_name, 10)
@@ -675,17 +788,8 @@ def generate_certificate(application: MembershipApplication, comment: str) -> Pa
     pdf.drawString(side_x, 82, "Проверка свидетельства")
     pdf.drawString(side_x, 70, "на официальном сайте")
 
-    if comment:
-        pdf.setFillColor(muted)
-        pdf.setFont(font_name, 7)
-        pdf.drawString(42, 18, f"Комментарий администратора: {comment[:140]}")
-
     pdf.save()
     return certificate_path
-
-
-def is_admin(telegram_id: int) -> bool:
-    return telegram_id in ADMIN_IDS
 
 
 async def notify_admins(bot: Bot, application_id: int) -> None:
@@ -706,7 +810,7 @@ async def start(message: Message, state: FSMContext) -> None:
     await state.clear()
     await message.answer(
         f"Здравствуйте! Это бот {ALLIANCE_NAME}. Выберите действие:",
-        reply_markup=main_menu(),
+        reply_markup=main_menu(message.from_user.id),
     )
 
 
@@ -719,12 +823,12 @@ async def show_id(message: Message) -> None:
 async def login(message: Message) -> None:
     profile = get_user(message.from_user.id)
     if profile is None:
-        await message.answer("Вы еще не зарегистрированы. Нажмите «Регистрация».", reply_markup=main_menu())
+        await message.answer("Вы еще не зарегистрированы. Нажмите «Регистрация».", reply_markup=main_menu(message.from_user.id))
         return
 
     await message.answer(
         f"Вход выполнен.\n\nФИО: {profile.full_name}\nТелефон: {profile.phone}",
-        reply_markup=main_menu(),
+        reply_markup=main_menu(message.from_user.id),
     )
 
 
@@ -733,8 +837,15 @@ async def registration_start(message: Message, state: FSMContext) -> None:
     profile = get_user(message.from_user.id)
     if profile is not None:
         await message.answer(
-            "Вы уже зарегистрированы. Повторная регистрация под тем же аккаунтом недоступна.",
-            reply_markup=main_menu(),
+            "Вы уже зарегистрированы. Повторная регистрация недоступна.",
+            reply_markup=main_menu(message.from_user.id),
+        )
+        return
+
+    if REGISTRATION_WEBAPP_URL:
+        await message.answer(
+            "Откройте мини-приложение регистрации через кнопку в меню.",
+            reply_markup=main_menu(message.from_user.id),
         )
         return
 
@@ -754,7 +865,7 @@ async def registration_phone(message: Message, state: FSMContext) -> None:
         await state.clear()
         await message.answer(
             "Этот номер телефона уже зарегистрирован. Повторная регистрация с ним недоступна.",
-            reply_markup=main_menu(),
+            reply_markup=main_menu(message.from_user.id),
         )
         return
 
@@ -798,14 +909,14 @@ async def registration_activity(message: Message, state: FSMContext) -> None:
         activity=message.text.strip(),
     )
     await state.clear()
-    await message.answer("Регистрация успешно завершена.", reply_markup=main_menu())
+    await message.answer("Регистрация успешно завершена.", reply_markup=main_menu(message.from_user.id))
 
 
 @router.message(F.text == "Заявление на вступление")
 async def application_start(message: Message, state: FSMContext) -> None:
     profile = get_user(message.from_user.id)
     if profile is None:
-        await message.answer("Сначала пройдите регистрацию.", reply_markup=main_menu())
+        await message.answer("Сначала пройдите регистрацию.", reply_markup=main_menu(message.from_user.id))
         return
 
     await state.clear()
@@ -822,7 +933,7 @@ async def application_identity_confirmed(message: Message, state: FSMContext) ->
 @router.message(Application.confirming_identity, F.text.casefold() == "нет")
 async def application_identity_rejected(message: Message, state: FSMContext) -> None:
     await state.clear()
-    await message.answer("Тогда пройдите регистрацию заново.", reply_markup=main_menu())
+    await message.answer("Тогда пройдите регистрацию заново.", reply_markup=main_menu(message.from_user.id))
 
 
 @router.message(Application.waiting_for_activity)
@@ -844,7 +955,7 @@ async def application_bin(message: Message, state: FSMContext) -> None:
     profile = get_user(message.from_user.id)
     if profile is None:
         await state.clear()
-        await message.answer("Регистрация не найдена. Пройдите регистрацию.", reply_markup=main_menu())
+        await message.answer("Регистрация не найдена. Пройдите регистрацию.", reply_markup=main_menu(message.from_user.id))
         return
 
     org_bin = message.text.strip()
@@ -879,23 +990,32 @@ async def application_submit(message: Message, state: FSMContext, bot: Bot) -> N
     await state.clear()
     await message.answer(
         f"Заявление №{application_id} успешно зарегистрировано.",
-        reply_markup=main_menu(),
+        reply_markup=main_menu(message.from_user.id),
     )
     await notify_admins(bot, application_id)
 
 
-@router.message(F.text == "Администратор")
+@router.message(F.text.in_({"Администратор", "Новые заявления"}))
 async def admin_panel(message: Message) -> None:
     if not is_admin(message.from_user.id):
-        await message.answer("У вас нет доступа к разделу администратора.", reply_markup=main_menu())
+        await message.answer("У вас нет доступа к разделу администратора.", reply_markup=main_menu(message.from_user.id))
         return
 
     applications = list_pending_applications()
     if not applications:
-        await message.answer("Новых заявлений пока нет.", reply_markup=main_menu())
+        await message.answer("Новых заявлений пока нет.", reply_markup=main_menu(message.from_user.id))
         return
 
     await message.answer("Новые заявления:", reply_markup=pending_applications_keyboard(applications))
+
+
+@router.message(F.text == "Реестр сертификатов")
+async def certificate_registry(message: Message) -> None:
+    if not is_admin(message.from_user.id):
+        await message.answer("У вас нет доступа к реестру сертификатов.", reply_markup=main_menu(message.from_user.id))
+        return
+
+    await message.answer(render_certificate_registry(list_issued_certificates()), reply_markup=main_menu(message.from_user.id))
 
 
 @router.message(F.text == "Новости")
@@ -907,7 +1027,7 @@ async def news(message: Message) -> None:
 async def my_status(message: Message) -> None:
     application = get_last_application(message.from_user.id)
     if application is None:
-        await message.answer("У вас пока нет поданных заявлений.", reply_markup=main_menu())
+        await message.answer("У вас пока нет поданных заявлений.", reply_markup=main_menu(message.from_user.id))
         return
 
     status_labels = {
@@ -918,7 +1038,7 @@ async def my_status(message: Message) -> None:
     text = f"Последнее заявление №{application.id}: {status_labels.get(application.status, application.status)}"
     if application.admin_comment:
         text += f"\nКомментарий: {application.admin_comment}"
-    await message.answer(text, reply_markup=main_menu())
+    await message.answer(text, reply_markup=main_menu(message.from_user.id))
 
 
 @router.callback_query(F.data.startswith("view:"))
@@ -950,7 +1070,7 @@ async def admin_approve_start(callback: CallbackQuery, state: FSMContext) -> Non
     application_id = int(callback.data.split(":", 1)[1])
     await state.set_state(AdminReview.waiting_for_approval_comment)
     await state.update_data(application_id=application_id)
-    await callback.message.answer(f"Введите комментарий для одобрения заявки #{application_id}.")
+    await callback.message.answer(f"Введите комментарий для одобрения заявки #{application_id}. Он будет добавлен в сертификат.")
     await callback.answer()
 
 
@@ -958,7 +1078,7 @@ async def admin_approve_start(callback: CallbackQuery, state: FSMContext) -> Non
 async def admin_approve_finish(message: Message, state: FSMContext, bot: Bot) -> None:
     if not is_admin(message.from_user.id):
         await state.clear()
-        await message.answer("Нет доступа.", reply_markup=main_menu())
+        await message.answer("Нет доступа.", reply_markup=main_menu(message.from_user.id))
         return
 
     data = await state.get_data()
@@ -966,7 +1086,7 @@ async def admin_approve_finish(message: Message, state: FSMContext, bot: Bot) ->
     application = get_application(application_id)
     if application is None or application.status != "pending":
         await state.clear()
-        await message.answer("Заявление не найдено или уже обработано.", reply_markup=main_menu())
+        await message.answer("Заявление не найдено или уже обработано.", reply_markup=main_menu(message.from_user.id))
         return
 
     comment = message.text.strip()
@@ -980,7 +1100,7 @@ async def admin_approve_finish(message: Message, state: FSMContext, bot: Bot) ->
     )
     await state.clear()
 
-    await message.answer(f"Заявка #{application_id} одобрена.", reply_markup=main_menu())
+    await message.answer(f"Заявка #{application_id} одобрена.", reply_markup=main_menu(message.from_user.id))
     await bot.send_message(
         application.telegram_id,
         render_approved_message(application),
@@ -1010,7 +1130,7 @@ async def admin_reject_start(callback: CallbackQuery, state: FSMContext) -> None
 async def admin_reject_finish(message: Message, state: FSMContext, bot: Bot) -> None:
     if not is_admin(message.from_user.id):
         await state.clear()
-        await message.answer("Нет доступа.", reply_markup=main_menu())
+        await message.answer("Нет доступа.", reply_markup=main_menu(message.from_user.id))
         return
 
     data = await state.get_data()
@@ -1018,7 +1138,7 @@ async def admin_reject_finish(message: Message, state: FSMContext, bot: Bot) -> 
     application = get_application(application_id)
     if application is None or application.status != "pending":
         await state.clear()
-        await message.answer("Заявление не найдено или уже обработано.", reply_markup=main_menu())
+        await message.answer("Заявление не найдено или уже обработано.", reply_markup=main_menu(message.from_user.id))
         return
 
     reason = message.text.strip()
@@ -1030,7 +1150,7 @@ async def admin_reject_finish(message: Message, state: FSMContext, bot: Bot) -> 
     )
     await state.clear()
 
-    await message.answer(f"По заявке #{application_id} отправлен отказ.", reply_markup=main_menu())
+    await message.answer(f"По заявке #{application_id} отправлен отказ.", reply_markup=main_menu(message.from_user.id))
     await bot.send_message(
         application.telegram_id,
         f"По вашему заявлению №{application_id} отказ.\nПричина: {reason}",
