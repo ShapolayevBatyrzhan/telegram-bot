@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Iterable
-from urllib.parse import parse_qsl
+from urllib.parse import parse_qsl, urlparse
 
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.client.default import DefaultBotProperties
@@ -459,13 +459,20 @@ def registration_webapp_keyboard() -> InlineKeyboardMarkup:
                     text="Продолжить регистрацию",
                     web_app=WebAppInfo(url=REGISTRATION_WEBAPP_URL),
                 )
-            ]
+            ],
+            [InlineKeyboardButton(text="Открыть форму в браузере", url=REGISTRATION_WEBAPP_URL)],
         ]
     )
 
 
 def has_valid_registration_webapp_url() -> bool:
-    return REGISTRATION_WEBAPP_URL.startswith("https://")
+    parsed = urlparse(REGISTRATION_WEBAPP_URL)
+    return (
+        parsed.scheme == "https"
+        and bool(parsed.netloc)
+        and "your-service" not in parsed.netloc
+        and parsed.path.rstrip("/") == "/register"
+    )
 
 
 def guest_menu() -> ReplyKeyboardMarkup:
@@ -895,6 +902,23 @@ async def start(message: Message, state: FSMContext) -> None:
 @router.message(Command("id"))
 async def show_id(message: Message) -> None:
     await message.answer(f"Ваш Telegram ID: <code>{message.from_user.id}</code>")
+
+
+@router.message(Command("miniapp"))
+async def show_mini_app_status(message: Message) -> None:
+    if not has_valid_registration_webapp_url():
+        await message.answer(
+            "Mini App не настроена.\n\n"
+            "В Railway Variables укажите:\n"
+            "<code>REGISTRATION_WEBAPP_URL=https://ваш-домен.up.railway.app/register</code>"
+        )
+        return
+
+    await message.answer(
+        f"Адрес Mini App:\n{REGISTRATION_WEBAPP_URL}\n\n"
+        "Если верхняя кнопка не открывается внутри Telegram, проверьте нижнюю кнопку в браузере.",
+        reply_markup=registration_webapp_keyboard(),
+    )
 
 
 @router.message(F.text == "Вход")
