@@ -56,4 +56,17 @@ CHAIRMAN_POSITION=Председатель Гражданского Альянс
 - `runtime.txt` с Python `3.11`;
 - `railway.json` со стартовой командой `python bot.py`.
 
-В Railway нужно добавить переменные из `.env.example` в раздел `Variables`, затем сделать redeploy.
+В Railway:
+
+1. Подключите к сервису Volume с Mount Path `/data`.
+2. В разделе Networking нажмите `Generate Domain`.
+3. Добавьте переменные из `.env.example` в раздел `Variables`.
+4. Для Mini App укажите сгенерированный домен:
+
+```env
+REGISTRATION_WEBAPP_URL=https://your-service.up.railway.app/register
+DATABASE_PATH=/data/alliance_bot.sqlite3
+CERTIFICATES_DIR=/data/certificates
+```
+
+После redeploy пользователь сначала подтверждает номер через кнопку Telegram, затем открывает Mini App и заполняет ФИО, ИИН и вид деятельности. Web-сервер Mini App и Telegram-бот работают в одном Railway-сервисе.

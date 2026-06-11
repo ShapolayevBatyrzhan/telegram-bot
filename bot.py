@@ -1,12 +1,17 @@
 import asyncio
+import hashlib
+import hmac
+import json
 import logging
 import os
 import sqlite3
+import time
 from contextlib import closing
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Iterable
+from urllib.parse import parse_qsl
 
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.client.default import DefaultBotProperties
@@ -27,6 +32,7 @@ from aiogram.types import (
     WebAppInfo,
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
+from aiohttp import web
 from dotenv import load_dotenv
 from reportlab.graphics import renderPDF
 from reportlab.graphics.barcode.qr import QrCodeWidget
@@ -71,6 +77,8 @@ ALLIANCE_WEBSITE = os.getenv("ALLIANCE_WEBSITE", "")
 ALLIANCE_SOCIAL_URL = os.getenv("ALLIANCE_SOCIAL_URL", "")
 CERTIFICATE_VERIFY_BASE_URL = os.getenv("CERTIFICATE_VERIFY_BASE_URL", ALLIANCE_WEBSITE)
 REGISTRATION_WEBAPP_URL = os.getenv("REGISTRATION_WEBAPP_URL", "")
+PORT = int(os.getenv("PORT", "8080"))
+MINI_APP_DIR = Path("miniapp")
 CHAIRMAN_NAME = os.getenv("CHAIRMAN_NAME", "Утеуова Аяжан Дюсембаевна")
 CHAIRMAN_POSITION = os.getenv("CHAIRMAN_POSITION", "Председатель Гражданского Альянса города Астаны")
 
@@ -169,6 +177,13 @@ def init_db() -> None:
                 reviewed_at TEXT,
                 FOREIGN KEY (telegram_id) REFERENCES users(telegram_id)
             );
+
+            CREATE TABLE IF NOT EXISTS pending_registrations (
+                telegram_id INTEGER PRIMARY KEY,
+                phone TEXT NOT NULL,
+                phone_normalized TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
             """
         )
 
@@ -200,6 +215,36 @@ def init_db() -> None:
         except sqlite3.IntegrityError:
             logging.warning("Cannot create unique phone index: duplicate phones already exist.")
 
+        connection.commit()
+
+
+def save_pending_registration(telegram_id: int, phone: str) -> None:
+    with closing(connect_db()) as connection:
+        connection.execute(
+            """
+            INSERT INTO pending_registrations (telegram_id, phone, phone_normalized, created_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(telegram_id) DO UPDATE SET
+                phone = excluded.phone,
+                phone_normalized = excluded.phone_normalized,
+                created_at = excluded.created_at
+            """,
+            (telegram_id, phone, normalize_phone(phone), datetime.now().isoformat(timespec="seconds")),
+        )
+        connection.commit()
+
+
+def get_pending_registration(telegram_id: int) -> sqlite3.Row | None:
+    with closing(connect_db()) as connection:
+        return connection.execute(
+            "SELECT telegram_id, phone, phone_normalized, created_at FROM pending_registrations WHERE telegram_id = ?",
+            (telegram_id,),
+        ).fetchone()
+
+
+def delete_pending_registration(telegram_id: int) -> None:
+    with closing(connect_db()) as connection:
+        connection.execute("DELETE FROM pending_registrations WHERE telegram_id = ?", (telegram_id,))
         connection.commit()
 
 
@@ -387,10 +432,36 @@ def is_admin(telegram_id: int) -> bool:
     return normalize_phone(profile.phone) in ADMIN_PHONES
 
 
+def get_admin_telegram_ids() -> set[int]:
+    admin_ids = set(ADMIN_IDS)
+    if not ADMIN_PHONES:
+        return admin_ids
+
+    placeholders = ",".join("?" for _ in ADMIN_PHONES)
+    with closing(connect_db()) as connection:
+        rows = connection.execute(
+            f"SELECT telegram_id FROM users WHERE phone_normalized IN ({placeholders})",
+            tuple(ADMIN_PHONES),
+        ).fetchall()
+    admin_ids.update(int(row["telegram_id"]) for row in rows)
+    return admin_ids
+
+
 def registration_button() -> KeyboardButton:
-    if REGISTRATION_WEBAPP_URL:
-        return KeyboardButton(text="Регистрация", web_app=WebAppInfo(url=REGISTRATION_WEBAPP_URL))
     return KeyboardButton(text="Регистрация")
+
+
+def registration_webapp_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="Продолжить регистрацию",
+                    web_app=WebAppInfo(url=REGISTRATION_WEBAPP_URL),
+                )
+            ]
+        ]
+    )
 
 
 def guest_menu() -> ReplyKeyboardMarkup:
@@ -801,7 +872,7 @@ async def notify_admins(bot: Bot, application_id: int) -> None:
         return
 
     text = "Поступило новое заявление.\n\n" + render_application_for_admin(application)
-    for admin_id in ADMIN_IDS:
+    for admin_id in get_admin_telegram_ids():
         try:
             await bot.send_message(admin_id, text, reply_markup=admin_application_keyboard(application_id))
         except Exception:
@@ -845,13 +916,6 @@ async def registration_start(message: Message, state: FSMContext) -> None:
         )
         return
 
-    if REGISTRATION_WEBAPP_URL:
-        await message.answer(
-            "Откройте мини-приложение регистрации через кнопку в меню.",
-            reply_markup=main_menu(message.from_user.id),
-        )
-        return
-
     await state.clear()
     await state.set_state(Registration.waiting_for_phone)
     await message.answer("Нажмите кнопку ниже, чтобы поделиться номером телефона.", reply_markup=phone_keyboard())
@@ -869,6 +933,15 @@ async def registration_phone(message: Message, state: FSMContext) -> None:
         await message.answer(
             "Этот номер телефона уже зарегистрирован. Повторная регистрация с ним недоступна.",
             reply_markup=main_menu(message.from_user.id),
+        )
+        return
+
+    if REGISTRATION_WEBAPP_URL:
+        save_pending_registration(message.from_user.id, message.contact.phone_number)
+        await state.clear()
+        await message.answer(
+            "Номер подтвержден. Нажмите кнопку ниже и заполните форму регистрации.",
+            reply_markup=registration_webapp_keyboard(),
         )
         return
 
@@ -1160,6 +1233,100 @@ async def admin_reject_finish(message: Message, state: FSMContext, bot: Bot) -> 
     )
 
 
+def validate_telegram_init_data(init_data: str) -> int | None:
+    if not init_data or not BOT_TOKEN:
+        return None
+
+    values = dict(parse_qsl(init_data, keep_blank_values=True))
+    received_hash = values.pop("hash", "")
+    auth_date = values.get("auth_date", "")
+    if not received_hash or not auth_date.isdigit():
+        return None
+    if abs(time.time() - int(auth_date)) > 3600:
+        return None
+
+    data_check_string = "\n".join(f"{key}={values[key]}" for key in sorted(values))
+    secret_key = hmac.new(b"WebAppData", BOT_TOKEN.encode(), hashlib.sha256).digest()
+    calculated_hash = hmac.new(secret_key, data_check_string.encode(), hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(calculated_hash, received_hash):
+        return None
+
+    try:
+        user_data = json.loads(values["user"])
+        return int(user_data["id"])
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+        return None
+
+
+async def mini_app_page(request: web.Request) -> web.FileResponse:
+    return web.FileResponse(MINI_APP_DIR / "index.html")
+
+
+async def mini_app_logo(request: web.Request) -> web.FileResponse:
+    return web.FileResponse(LOGO_PATH)
+
+
+async def mini_app_health(request: web.Request) -> web.Response:
+    return web.json_response({"status": "ok"})
+
+
+async def mini_app_register(request: web.Request) -> web.Response:
+    try:
+        payload = await request.json()
+    except json.JSONDecodeError:
+        return web.json_response({"ok": False, "error": "Некорректные данные."}, status=400)
+
+    telegram_id = validate_telegram_init_data(str(payload.get("initData", "")))
+    if telegram_id is None:
+        return web.json_response(
+            {"ok": False, "error": "Откройте форму через кнопку регистрации внутри Telegram."},
+            status=401,
+        )
+
+    pending = get_pending_registration(telegram_id)
+    if pending is None:
+        return web.json_response(
+            {"ok": False, "error": "Сначала подтвердите номер телефона в боте."},
+            status=400,
+        )
+
+    if get_user(telegram_id) is not None or get_user_by_phone(pending["phone"]) is not None:
+        delete_pending_registration(telegram_id)
+        return web.json_response({"ok": False, "error": "Этот пользователь или номер уже зарегистрирован."}, status=409)
+
+    full_name = str(payload.get("fullName", "")).strip()
+    iin = str(payload.get("iin", "")).strip()
+    activity = str(payload.get("activity", "")).strip()
+    if len(full_name) < 5:
+        return web.json_response({"ok": False, "error": "Введите ФИО полностью."}, status=400)
+    if not iin.isdigit() or len(iin) != 12:
+        return web.json_response({"ok": False, "error": "ИИН должен состоять из 12 цифр."}, status=400)
+    if len(activity) < 3:
+        return web.json_response({"ok": False, "error": "Укажите вид деятельности."}, status=400)
+
+    upsert_user(telegram_id, pending["phone"], full_name, iin, activity)
+    delete_pending_registration(telegram_id)
+
+    bot: Bot = request.app["bot"]
+    await bot.send_message(
+        telegram_id,
+        "Регистрация успешно завершена.",
+        reply_markup=main_menu(telegram_id),
+    )
+    return web.json_response({"ok": True})
+
+
+def create_web_app(bot: Bot) -> web.Application:
+    app = web.Application()
+    app["bot"] = bot
+    app.router.add_get("/", mini_app_health)
+    app.router.add_get("/health", mini_app_health)
+    app.router.add_get("/register", mini_app_page)
+    app.router.add_get("/assets/alliance-logo.jpeg", mini_app_logo)
+    app.router.add_post("/api/register", mini_app_register)
+    return app
+
+
 async def main() -> None:
     if not BOT_TOKEN:
         raise RuntimeError("BOT_TOKEN is not set. Copy .env.example to .env and fill BOT_TOKEN.")
@@ -1169,7 +1336,15 @@ async def main() -> None:
     bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     dispatcher = Dispatcher(storage=MemoryStorage())
     dispatcher.include_router(router)
-    await dispatcher.start_polling(bot)
+    web_runner = web.AppRunner(create_web_app(bot))
+    await web_runner.setup()
+    site = web.TCPSite(web_runner, "0.0.0.0", PORT)
+    await site.start()
+    logging.info("Mini App server started on port %s", PORT)
+    try:
+        await dispatcher.start_polling(bot)
+    finally:
+        await web_runner.cleanup()
 
 
 if __name__ == "__main__":

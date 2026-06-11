@@ -1,0 +1,234 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Регистрация в Альянсе</title>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <style>
+    :root {
+      color-scheme: light;
+      --navy: #08213f;
+      --coral: #e85d4f;
+      --coral-soft: #f9e1dd;
+      --line: #d8dee6;
+      --muted: #5c6775;
+      --surface: #ffffff;
+      --background: #f4f6f8;
+      font-family: Arial, sans-serif;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background: var(--background);
+      color: var(--navy);
+    }
+
+    .topbar {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      min-height: 82px;
+      padding: 12px 18px;
+      background: var(--surface);
+      border-bottom: 3px solid var(--coral);
+    }
+
+    .topbar img {
+      width: 58px;
+      height: 58px;
+      object-fit: contain;
+    }
+
+    .topbar h1 {
+      margin: 0;
+      font-size: 18px;
+      line-height: 1.25;
+      letter-spacing: 0;
+    }
+
+    .topbar p {
+      margin: 4px 0 0;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    main {
+      width: min(100%, 620px);
+      margin: 0 auto;
+      padding: 22px 16px calc(28px + env(safe-area-inset-bottom));
+    }
+
+    .status {
+      margin-bottom: 20px;
+      padding: 12px 14px;
+      border-left: 4px solid var(--coral);
+      background: var(--coral-soft);
+      font-size: 14px;
+      line-height: 1.45;
+    }
+
+    form {
+      display: grid;
+      gap: 17px;
+    }
+
+    label {
+      display: grid;
+      gap: 7px;
+      font-size: 14px;
+      font-weight: 700;
+    }
+
+    input, textarea {
+      width: 100%;
+      min-height: 48px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: var(--surface);
+      color: var(--navy);
+      padding: 12px 13px;
+      font: inherit;
+      font-size: 16px;
+      outline: none;
+    }
+
+    textarea {
+      min-height: 96px;
+      resize: vertical;
+    }
+
+    input:focus, textarea:focus {
+      border-color: var(--coral);
+      box-shadow: 0 0 0 3px var(--coral-soft);
+    }
+
+    .hint {
+      margin: -2px 0 0;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 400;
+    }
+
+    button {
+      min-height: 50px;
+      border: 0;
+      border-radius: 6px;
+      background: var(--coral);
+      color: white;
+      font-size: 16px;
+      font-weight: 700;
+      cursor: pointer;
+    }
+
+    button:disabled {
+      opacity: .55;
+      cursor: wait;
+    }
+
+    .message {
+      display: none;
+      padding: 12px 14px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: var(--surface);
+      font-size: 14px;
+      line-height: 1.4;
+    }
+
+    .message.error {
+      display: block;
+      border-color: #d84b4b;
+      color: #9f2525;
+    }
+
+    .message.success {
+      display: block;
+      border-color: #2f8a5b;
+      color: #17663e;
+    }
+  </style>
+</head>
+<body>
+  <header class="topbar">
+    <img src="/assets/alliance-logo.jpeg" alt="Логотип Альянса">
+    <div>
+      <h1>Регистрация участника</h1>
+      <p>Гражданский Альянс города Астаны</p>
+    </div>
+  </header>
+
+  <main>
+    <div class="status">Ваш номер телефона уже подтвержден через Telegram. Заполните оставшиеся данные.</div>
+
+    <form id="registration-form">
+      <label>
+        ФИО полностью
+        <input id="full-name" name="fullName" autocomplete="name" required minlength="5" placeholder="Иванова Айгуль Сериковна">
+      </label>
+
+      <label>
+        ИИН
+        <input id="iin" name="iin" inputmode="numeric" maxlength="12" pattern="[0-9]{12}" required placeholder="12 цифр">
+        <span class="hint">ИИН должен состоять из 12 цифр.</span>
+      </label>
+
+      <label>
+        Вид деятельности
+        <textarea id="activity" name="activity" required minlength="3" placeholder="Опишите основное направление деятельности"></textarea>
+      </label>
+
+      <div id="message" class="message" role="status"></div>
+      <button id="submit-button" type="submit">Завершить регистрацию</button>
+    </form>
+  </main>
+
+  <script>
+    const telegram = window.Telegram?.WebApp;
+    telegram?.ready();
+    telegram?.expand();
+
+    const form = document.getElementById("registration-form");
+    const message = document.getElementById("message");
+    const button = document.getElementById("submit-button");
+
+    function showMessage(text, type) {
+      message.textContent = text;
+      message.className = `message ${type}`;
+    }
+
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      button.disabled = true;
+      showMessage("Сохраняем данные...", "success");
+
+      try {
+        const response = await fetch("/api/register", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            initData: telegram?.initData || "",
+            fullName: document.getElementById("full-name").value.trim(),
+            iin: document.getElementById("iin").value.trim(),
+            activity: document.getElementById("activity").value.trim()
+          })
+        });
+
+        const result = await response.json();
+        if (!response.ok || !result.ok) {
+          throw new Error(result.error || "Не удалось завершить регистрацию.");
+        }
+
+        showMessage("Регистрация завершена. Возвращаемся в бот.", "success");
+        setTimeout(() => telegram?.close(), 1200);
+      } catch (error) {
+        showMessage(error.message, "error");
+        button.disabled = false;
+      }
+    });
+  </script>
+</body>
+</html>
