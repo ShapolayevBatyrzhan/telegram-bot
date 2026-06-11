@@ -428,9 +428,12 @@ def admin_menu() -> ReplyKeyboardMarkup:
 
 
 def main_menu(telegram_id: int | None = None) -> ReplyKeyboardMarkup:
-    if telegram_id is not None and is_admin(telegram_id):
-        return admin_menu()
-    if telegram_id is not None and get_user(telegram_id):
+    if telegram_id is not None:
+        profile = get_user(telegram_id)
+        if profile is None:
+            return guest_menu()
+        if is_admin(telegram_id):
+            return admin_menu()
         return user_menu()
     return guest_menu()
 
