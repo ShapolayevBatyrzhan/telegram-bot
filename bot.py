@@ -68,6 +68,9 @@ CERTIFICATES_DIR = Path(os.getenv("CERTIFICATES_DIR") or default_certificates_di
 ASSETS_DIR = Path("assets")
 LOGO_PATH = ASSETS_DIR / "alliance-logo.jpeg"
 PDF_FONT_PATH = ASSETS_DIR / "app-font.ttf"
+SKYLINE_PATH = ASSETS_DIR / "astana-skyline.png"
+SIGNATURE_PATH = ASSETS_DIR / "chairman-signature.png"
+STAMP_PATH = ASSETS_DIR / "alliance-stamp.png"
 
 ALLIANCE_NAME = os.getenv("ALLIANCE_NAME", "Гражданский Альянс города Астаны")
 ALLIANCE_BIN = os.getenv("ALLIANCE_BIN", "")
@@ -797,9 +800,40 @@ def draw_pdf_background(pdf: canvas.Canvas, page_width: float, page_height: floa
 
     pdf.setFillColor(colors.white)
     pdf.rect(0, 0, page_width, page_height, fill=True, stroke=False)
+
+    top_left = pdf.beginPath()
+    top_left.moveTo(0, page_height)
+    top_left.lineTo(145, page_height)
+    top_left.lineTo(0, page_height - 92)
+    top_left.close()
     pdf.setFillColor(navy)
-    pdf.rect(0, 0, 18, page_height, fill=True, stroke=False)
-    pdf.rect(page_width - 18, 0, 18, page_height, fill=True, stroke=False)
+    pdf.drawPath(top_left, fill=True, stroke=False)
+
+    top_left_coral = pdf.beginPath()
+    top_left_coral.moveTo(0, page_height - 58)
+    top_left_coral.lineTo(154, page_height)
+    top_left_coral.lineTo(126, page_height)
+    top_left_coral.lineTo(0, page_height - 78)
+    top_left_coral.close()
+    pdf.setFillColor(coral)
+    pdf.drawPath(top_left_coral, fill=True, stroke=False)
+
+    bottom_right = pdf.beginPath()
+    bottom_right.moveTo(page_width, 0)
+    bottom_right.lineTo(page_width - 145, 0)
+    bottom_right.lineTo(page_width, 92)
+    bottom_right.close()
+    pdf.setFillColor(navy)
+    pdf.drawPath(bottom_right, fill=True, stroke=False)
+
+    bottom_right_coral = pdf.beginPath()
+    bottom_right_coral.moveTo(page_width, 58)
+    bottom_right_coral.lineTo(page_width - 154, 0)
+    bottom_right_coral.lineTo(page_width - 126, 0)
+    bottom_right_coral.lineTo(page_width, 78)
+    bottom_right_coral.close()
+    pdf.setFillColor(coral)
+    pdf.drawPath(bottom_right_coral, fill=True, stroke=False)
 
     pdf.setStrokeColor(light_coral)
     pdf.setLineWidth(1.2)
@@ -825,19 +859,21 @@ def generate_certificate(application: MembershipApplication, comment: str) -> Pa
     muted = colors.HexColor("#53606F")
 
     if LOGO_PATH.exists():
-        pdf.drawImage(ImageReader(str(LOGO_PATH)), 118, page_height - 116, width=160, height=95, preserveAspectRatio=True, mask="auto")
+        pdf.drawImage(ImageReader(str(LOGO_PATH)), 112, page_height - 132, width=205, height=118, preserveAspectRatio=True, mask="auto")
+    if SKYLINE_PATH.exists():
+        pdf.drawImage(ImageReader(str(SKYLINE_PATH)), 500, page_height - 137, width=280, height=106, preserveAspectRatio=True, mask="auto")
 
     pdf.setFillColor(navy)
-    pdf.setFont(font_name, 38)
-    pdf.drawCentredString(330, page_height - 185, "СВИДЕТЕЛЬСТВО")
+    pdf.setFont(font_name, 42)
+    pdf.drawCentredString(330, page_height - 193, "СВИДЕТЕЛЬСТВО")
     pdf.setFillColor(coral)
-    pdf.setFont(font_name, 22)
-    pdf.drawCentredString(330, page_height - 220, "О ЧЛЕНСТВЕ")
+    pdf.setFont(font_name, 24)
+    pdf.drawCentredString(330, page_height - 230, "О ЧЛЕНСТВЕ")
 
     pdf.setStrokeColor(colors.HexColor("#F0B5AD"))
-    pdf.line(214, page_height - 240, 446, page_height - 240)
+    pdf.line(210, page_height - 249, 450, page_height - 249)
 
-    y = page_height - 278
+    y = page_height - 282
     y = draw_wrapped_text(pdf, "Настоящим подтверждается, что", 105, y, 450, font_name, 12, 18, muted, centered=True)
     y -= 8
     company_font_size = 24 if len(application.company_name) <= 45 else 18
@@ -867,26 +903,31 @@ def generate_certificate(application: MembershipApplication, comment: str) -> Pa
 
     pdf.setFillColor(navy)
     pdf.setFont(font_name, 10)
-    pdf.drawString(92, 142, "Председатель")
-    pdf.drawString(92, 128, "Гражданского Альянса")
-    pdf.drawString(92, 114, "города Астаны")
-    pdf.setStrokeColor(navy)
-    pdf.setLineWidth(1)
-    pdf.line(92, 92, 260, 92)
+    pdf.drawString(74, 154, "Председатель")
+    pdf.drawString(74, 140, "Гражданского Альянса")
+    pdf.drawString(74, 126, "города Астаны")
+    if SIGNATURE_PATH.exists():
+        pdf.drawImage(ImageReader(str(SIGNATURE_PATH)), 74, 62, width=185, height=72, preserveAspectRatio=True, mask="auto")
+    else:
+        pdf.setStrokeColor(navy)
+        pdf.setLineWidth(1)
+        pdf.line(74, 92, 255, 92)
     pdf.setFillColor(navy)
     pdf.setFont(font_name, 10)
-    pdf.drawString(92, 74, CHAIRMAN_NAME)
+    pdf.drawString(74, 58, CHAIRMAN_NAME)
+    if STAMP_PATH.exists():
+        pdf.drawImage(ImageReader(str(STAMP_PATH)), 337, 54, width=118, height=108, preserveAspectRatio=True, mask="auto")
     pdf.setFont(font_name, 9)
-    pdf.drawCentredString(418, 86, "М.П.")
+    pdf.drawCentredString(463, 64, "М.П.")
     pdf.setStrokeColor(colors.HexColor("#F0B5AD"))
-    pdf.line(160, 48, 520, 48)
+    pdf.line(145, 40, 525, 40)
     pdf.setFillColor(navy)
     pdf.setFont(font_name, 9)
-    pdf.drawCentredString(340, 30, "ВМЕСТЕ РАЗВИВАЕМ ГРАЖДАНСКОЕ ОБЩЕСТВО!")
+    pdf.drawCentredString(335, 22, "ВМЕСТЕ РАЗВИВАЕМ ГРАЖДАНСКОЕ ОБЩЕСТВО!")
 
-    side_x = 610
+    side_x = 620
     pdf.setStrokeColor(colors.HexColor("#F0B5AD"))
-    pdf.line(side_x - 24, 128, side_x - 24, page_height - 185)
+    pdf.line(side_x - 24, 112, side_x - 24, page_height - 186)
 
     side_items = [
         ("Дата вступления", join_date.strftime("%d.%m.%Y")),
@@ -894,7 +935,7 @@ def generate_certificate(application: MembershipApplication, comment: str) -> Pa
         ("Статус", "Член Гражданского\nАльянса города Астаны"),
         ("Дата выдачи", join_date.strftime("%d.%m.%Y")),
     ]
-    side_y = page_height - 218
+    side_y = page_height - 216
     for title, value in side_items:
         pdf.setFillColor(navy)
         pdf.setFont(font_name, 11)
@@ -906,12 +947,12 @@ def generate_certificate(application: MembershipApplication, comment: str) -> Pa
             pdf.drawString(side_x, value_y, line)
             value_y -= 14
         pdf.setStrokeColor(colors.HexColor("#F0B5AD"))
-        pdf.line(side_x, value_y - 8, side_x + 165, value_y - 8)
+        pdf.line(side_x, value_y - 8, side_x + 150, value_y - 8)
         side_y = value_y - 26
 
-    qr_size = 76
-    qr_x = side_x + 42
-    qr_y = 62
+    qr_size = 74
+    qr_x = side_x + 33
+    qr_y = 66
     draw_qr(pdf, qr_link, qr_x, qr_y, qr_size)
     pdf.setFillColor(navy)
     pdf.setFont(font_name, 8)
