@@ -27,6 +27,7 @@ from aiogram.types import (
     InlineKeyboardMarkup,
     KeyboardButton,
     Message,
+    MenuButtonWebApp,
     ReplyKeyboardMarkup,
     ReplyKeyboardRemove,
     WebAppInfo,
@@ -184,6 +185,14 @@ def init_db() -> None:
                 phone_normalized TEXT NOT NULL,
                 created_at TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS admin_notifications (
+                application_id INTEGER NOT NULL,
+                admin_id INTEGER NOT NULL,
+                chat_id INTEGER NOT NULL,
+                message_id INTEGER NOT NULL,
+                PRIMARY KEY (application_id, admin_id, message_id)
+            );
             """
         )
 
@@ -245,6 +254,32 @@ def get_pending_registration(telegram_id: int) -> sqlite3.Row | None:
 def delete_pending_registration(telegram_id: int) -> None:
     with closing(connect_db()) as connection:
         connection.execute("DELETE FROM pending_registrations WHERE telegram_id = ?", (telegram_id,))
+        connection.commit()
+
+
+def save_admin_notification(application_id: int, admin_id: int, chat_id: int, message_id: int) -> None:
+    with closing(connect_db()) as connection:
+        connection.execute(
+            """
+            INSERT OR IGNORE INTO admin_notifications (application_id, admin_id, chat_id, message_id)
+            VALUES (?, ?, ?, ?)
+            """,
+            (application_id, admin_id, chat_id, message_id),
+        )
+        connection.commit()
+
+
+def get_admin_notifications(application_id: int) -> list[sqlite3.Row]:
+    with closing(connect_db()) as connection:
+        return connection.execute(
+            "SELECT chat_id, message_id FROM admin_notifications WHERE application_id = ?",
+            (application_id,),
+        ).fetchall()
+
+
+def delete_admin_notifications(application_id: int) -> None:
+    with closing(connect_db()) as connection:
+        connection.execute("DELETE FROM admin_notifications WHERE application_id = ?", (application_id,))
         connection.commit()
 
 
@@ -767,11 +802,6 @@ def draw_pdf_background(pdf: canvas.Canvas, page_width: float, page_height: floa
     pdf.rect(0, 0, 18, page_height, fill=True, stroke=False)
     pdf.rect(page_width - 18, 0, 18, page_height, fill=True, stroke=False)
 
-    pdf.setStrokeColor(coral)
-    pdf.setLineWidth(1.5)
-    pdf.line(22, page_height - 2, 130, page_height - 64)
-    pdf.line(page_width - 24, 0, page_width - 135, 65)
-
     pdf.setStrokeColor(light_coral)
     pdf.setLineWidth(1.2)
     pdf.roundRect(28, 22, page_width - 56, page_height - 44, 6, stroke=True, fill=False)
@@ -836,10 +866,6 @@ def generate_certificate(application: MembershipApplication, comment: str) -> Pa
     pdf.setFont(font_name, 14)
     pdf.drawCentredString(330, y, ALLIANCE_NAME)
 
-    if comment:
-        y -= 28
-        draw_wrapped_text(pdf, f"Комментарий: {comment}", 124, y, 410, font_name, 10, 14, muted, centered=True)
-
     pdf.setFillColor(navy)
     pdf.setFont(font_name, 10)
     pdf.drawString(92, 142, "Председатель")
@@ -884,11 +910,14 @@ def generate_certificate(application: MembershipApplication, comment: str) -> Pa
         pdf.line(side_x, value_y - 8, side_x + 165, value_y - 8)
         side_y = value_y - 26
 
-    draw_qr(pdf, qr_link, side_x + 10, 102, 82)
+    qr_size = 76
+    qr_x = side_x + 42
+    qr_y = 62
+    draw_qr(pdf, qr_link, qr_x, qr_y, qr_size)
     pdf.setFillColor(navy)
     pdf.setFont(font_name, 8)
-    pdf.drawString(side_x, 82, "Проверка свидетельства")
-    pdf.drawString(side_x, 70, "на официальном сайте")
+    pdf.drawCentredString(qr_x + qr_size / 2, 48, "Проверка свидетельства")
+    pdf.drawCentredString(qr_x + qr_size / 2, 36, "на официальном сайте")
 
     pdf.save()
     return certificate_path
@@ -902,9 +931,41 @@ async def notify_admins(bot: Bot, application_id: int) -> None:
     text = "Поступило новое заявление.\n\n" + render_application_for_admin(application)
     for admin_id in get_admin_telegram_ids():
         try:
-            await bot.send_message(admin_id, text, reply_markup=admin_application_keyboard(application_id))
+            sent_message = await bot.send_message(
+                admin_id,
+                text,
+                reply_markup=admin_application_keyboard(application_id),
+            )
+            save_admin_notification(application_id, admin_id, sent_message.chat.id, sent_message.message_id)
         except Exception:
             logging.exception("Could not notify admin %s", admin_id)
+
+
+async def sync_admin_notifications(bot: Bot, application_id: int) -> None:
+    application = get_application(application_id)
+    if application is None:
+        return
+
+    status_labels = {"approved": "ОДОБРЕНО", "rejected": "ОТКЛОНЕНО", "pending": "НА РАССМОТРЕНИИ"}
+    text = (
+        render_application_for_admin(application)
+        + f"\n\n<b>Решение: {status_labels.get(application.status, application.status)}</b>"
+    )
+    for notification in get_admin_notifications(application_id):
+        try:
+            await bot.edit_message_text(
+                text,
+                chat_id=notification["chat_id"],
+                message_id=notification["message_id"],
+                reply_markup=None,
+            )
+        except Exception:
+            logging.exception(
+                "Could not sync admin notification chat=%s message=%s",
+                notification["chat_id"],
+                notification["message_id"],
+            )
+    delete_admin_notifications(application_id)
 
 
 @router.message(CommandStart())
@@ -1253,10 +1314,17 @@ async def admin_view_application(callback: CallbackQuery, state: FSMContext) -> 
         return
 
     await state.clear()
-    await callback.message.answer(
+    sent_message = await callback.message.answer(
         render_application_for_admin(application),
-        reply_markup=admin_application_keyboard(application_id),
+        reply_markup=admin_application_keyboard(application_id) if application.status == "pending" else None,
     )
+    if application.status == "pending":
+        save_admin_notification(
+            application_id,
+            callback.from_user.id,
+            sent_message.chat.id,
+            sent_message.message_id,
+        )
     await callback.answer()
 
 
@@ -1267,9 +1335,15 @@ async def admin_approve_start(callback: CallbackQuery, state: FSMContext) -> Non
         return
 
     application_id = int(callback.data.split(":", 1)[1])
+    application = get_application(application_id)
+    if application is None or application.status != "pending":
+        await callback.message.edit_reply_markup(reply_markup=None)
+        await callback.answer("Заявление уже обработано", show_alert=True)
+        return
+
     await state.set_state(AdminReview.waiting_for_approval_comment)
     await state.update_data(application_id=application_id)
-    await callback.message.answer(f"Введите комментарий для одобрения заявки #{application_id}. Он будет добавлен в сертификат.")
+    await callback.message.answer(f"Введите служебный комментарий для одобрения заявки #{application_id}.")
     await callback.answer()
 
 
@@ -1297,6 +1371,7 @@ async def admin_approve_finish(message: Message, state: FSMContext, bot: Bot) ->
         comment=comment,
         certificate_path=str(certificate_path),
     )
+    await sync_admin_notifications(bot, application_id)
     await state.clear()
 
     await message.answer(f"Заявка #{application_id} одобрена.", reply_markup=main_menu(message.from_user.id))
@@ -1319,6 +1394,12 @@ async def admin_reject_start(callback: CallbackQuery, state: FSMContext) -> None
         return
 
     application_id = int(callback.data.split(":", 1)[1])
+    application = get_application(application_id)
+    if application is None or application.status != "pending":
+        await callback.message.edit_reply_markup(reply_markup=None)
+        await callback.answer("Заявление уже обработано", show_alert=True)
+        return
+
     await state.set_state(AdminReview.waiting_for_rejection_reason)
     await state.update_data(application_id=application_id)
     await callback.message.answer(f"Введите причину отказа по заявке #{application_id}.")
@@ -1347,6 +1428,7 @@ async def admin_reject_finish(message: Message, state: FSMContext, bot: Bot) -> 
         admin_id=message.from_user.id,
         comment=reason,
     )
+    await sync_admin_notifications(bot, application_id)
     await state.clear()
 
     await message.answer(f"По заявке #{application_id} отправлен отказ.", reply_markup=main_menu(message.from_user.id))
@@ -1391,6 +1473,107 @@ async def mini_app_logo(request: web.Request) -> web.FileResponse:
 
 async def mini_app_health(request: web.Request) -> web.Response:
     return web.json_response({"status": "ok"})
+
+
+def request_telegram_id(payload: dict) -> int | None:
+    return validate_telegram_init_data(str(payload.get("initData", "")))
+
+
+def application_to_api(application: MembershipApplication | None) -> dict | None:
+    if application is None:
+        return None
+    return {
+        "id": application.id,
+        "companyName": application.company_name,
+        "orgBin": application.org_bin,
+        "activity": application.application_activity,
+        "status": application.status,
+        "comment": application.admin_comment,
+        "createdAt": format_iso_date(application.created_at),
+        "reviewedAt": format_iso_date(application.reviewed_at),
+        "certificateNumber": certificate_number_for_application(application) if application.status == "approved" else None,
+    }
+
+
+async def mini_app_me(request: web.Request) -> web.Response:
+    init_data = request.query.get("initData", "")
+    telegram_id = validate_telegram_init_data(init_data)
+    if telegram_id is None:
+        return web.json_response({"ok": False, "error": "Откройте Mini App внутри Telegram."}, status=401)
+
+    profile = get_user(telegram_id)
+    return web.json_response(
+        {
+            "ok": True,
+            "registered": profile is not None,
+            "pendingPhone": get_pending_registration(telegram_id) is not None,
+            "isAdmin": is_admin(telegram_id),
+            "profile": (
+                {
+                    "fullName": profile.full_name,
+                    "phone": profile.phone,
+                    "iin": profile.iin,
+                    "activity": profile.activity,
+                }
+                if profile
+                else None
+            ),
+            "lastApplication": application_to_api(get_last_application(telegram_id)),
+        }
+    )
+
+
+async def mini_app_certificates(request: web.Request) -> web.Response:
+    certificates = [
+        {
+            "certificateNumber": certificate_number_for_application(application),
+            "companyName": application.company_name,
+            "orgBin": application.org_bin,
+            "issuedAt": format_iso_date(application.reviewed_at or application.created_at),
+        }
+        for application in list_issued_certificates(limit=100)
+    ]
+    return web.json_response({"ok": True, "certificates": certificates})
+
+
+async def mini_app_submit_application(request: web.Request) -> web.Response:
+    try:
+        payload = await request.json()
+    except json.JSONDecodeError:
+        return web.json_response({"ok": False, "error": "Некорректные данные."}, status=400)
+
+    telegram_id = request_telegram_id(payload)
+    if telegram_id is None:
+        return web.json_response({"ok": False, "error": "Откройте Mini App внутри Telegram."}, status=401)
+    if get_user(telegram_id) is None:
+        return web.json_response({"ok": False, "error": "Сначала завершите регистрацию."}, status=403)
+
+    last_application = get_last_application(telegram_id)
+    if last_application and last_application.status == "pending":
+        return web.json_response(
+            {"ok": False, "error": f"Заявление №{last_application.id} уже находится на рассмотрении."},
+            status=409,
+        )
+
+    company_name = str(payload.get("companyName", "")).strip()
+    org_bin = str(payload.get("orgBin", "")).strip()
+    activity = str(payload.get("activity", "")).strip()
+    if len(company_name) < 3:
+        return web.json_response({"ok": False, "error": "Введите полное наименование организации."}, status=400)
+    if not org_bin.isdigit() or len(org_bin) != 12:
+        return web.json_response({"ok": False, "error": "БИН должен состоять из 12 цифр."}, status=400)
+    if len(activity) < 3:
+        return web.json_response({"ok": False, "error": "Укажите вид деятельности организации."}, status=400)
+
+    application_id = create_application(telegram_id, activity, company_name, org_bin)
+    bot: Bot = request.app["bot"]
+    await notify_admins(bot, application_id)
+    await bot.send_message(
+        telegram_id,
+        f"Заявление №{application_id} успешно зарегистрировано.",
+        reply_markup=main_menu(telegram_id),
+    )
+    return web.json_response({"ok": True, "applicationId": application_id})
 
 
 async def mini_app_register(request: web.Request) -> web.Response:
@@ -1463,7 +1646,10 @@ def create_web_app(bot: Bot) -> web.Application:
     app.router.add_get("/health", mini_app_health)
     app.router.add_get("/register", mini_app_page)
     app.router.add_get("/assets/alliance-logo.jpeg", mini_app_logo)
+    app.router.add_get("/api/me", mini_app_me)
+    app.router.add_get("/api/certificates", mini_app_certificates)
     app.router.add_post("/api/register", mini_app_register)
+    app.router.add_post("/api/applications", mini_app_submit_application)
     app.router.add_post("/api/cancel-registration", mini_app_cancel)
     return app
 
@@ -1475,6 +1661,13 @@ async def main() -> None:
     logging.basicConfig(level=logging.INFO)
     init_db()
     bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+    if has_valid_registration_webapp_url():
+        await bot.set_chat_menu_button(
+            menu_button=MenuButtonWebApp(
+                text="Открыть приложение",
+                web_app=WebAppInfo(url=REGISTRATION_WEBAPP_URL),
+            )
+        )
     dispatcher = Dispatcher(storage=MemoryStorage())
     dispatcher.include_router(router)
     web_runner = web.AppRunner(create_web_app(bot))

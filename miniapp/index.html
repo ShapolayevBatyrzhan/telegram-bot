@@ -3,262 +3,279 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <title>Регистрация в Альянсе</title>
+  <title>Гражданский Альянс города Астаны</title>
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
   <style>
     :root {
       color-scheme: light;
       --navy: #08213f;
       --coral: #e85d4f;
-      --coral-soft: #f9e1dd;
-      --line: #d8dee6;
-      --muted: #5c6775;
+      --green: #247a55;
+      --background: #f3f5f7;
       --surface: #ffffff;
-      --background: #f4f6f8;
+      --line: #dce2e8;
+      --muted: #667281;
+      --danger: #a52f2f;
       font-family: Arial, sans-serif;
     }
-
     * { box-sizing: border-box; }
-
-    body {
-      margin: 0;
-      min-height: 100vh;
-      background: var(--background);
-      color: var(--navy);
-    }
-
+    body { margin: 0; min-height: 100vh; background: var(--background); color: var(--navy); }
+    button, input, textarea { font: inherit; }
+    .app { min-height: 100vh; padding-bottom: 78px; }
     .topbar {
-      display: flex;
-      align-items: center;
-      gap: 14px;
-      min-height: 82px;
-      padding: 12px 18px;
-      background: var(--surface);
-      border-bottom: 3px solid var(--coral);
+      position: sticky; top: 0; z-index: 5;
+      display: flex; align-items: center; gap: 12px;
+      min-height: 72px; padding: 10px 16px;
+      background: var(--surface); border-bottom: 3px solid var(--coral);
     }
-
-    .topbar img {
-      width: 58px;
-      height: 58px;
-      object-fit: contain;
+    .topbar img { width: 52px; height: 52px; object-fit: contain; }
+    .topbar h1 { margin: 0; font-size: 17px; line-height: 1.2; letter-spacing: 0; }
+    .topbar p { margin: 4px 0 0; color: var(--muted); font-size: 12px; }
+    main { width: min(100%, 680px); margin: 0 auto; padding: 18px 14px 28px; }
+    .view { display: none; }
+    .view.active { display: block; }
+    .eyebrow { color: var(--coral); font-size: 12px; font-weight: 700; text-transform: uppercase; }
+    h2 { margin: 6px 0 8px; font-size: 24px; letter-spacing: 0; }
+    .lead { margin: 0 0 18px; color: var(--muted); line-height: 1.5; font-size: 14px; }
+    .band {
+      padding: 16px; margin-bottom: 16px;
+      background: var(--navy); color: white; border-left: 5px solid var(--coral);
     }
-
-    .topbar h1 {
-      margin: 0;
-      font-size: 18px;
-      line-height: 1.25;
-      letter-spacing: 0;
+    .band strong { display: block; margin-bottom: 5px; font-size: 17px; }
+    .band span { color: #d7e1eb; font-size: 13px; line-height: 1.45; }
+    .cards { display: grid; gap: 10px; }
+    .card {
+      background: var(--surface); border: 1px solid var(--line); border-radius: 7px;
+      padding: 14px;
     }
-
-    .topbar p {
-      margin: 4px 0 0;
-      color: var(--muted);
-      font-size: 13px;
+    .card h3 { margin: 0 0 8px; font-size: 16px; letter-spacing: 0; }
+    .card p { margin: 4px 0; color: var(--muted); font-size: 13px; line-height: 1.45; }
+    .status-pill {
+      display: inline-block; padding: 5px 8px; border-radius: 4px;
+      background: #edf1f4; color: var(--navy); font-size: 12px; font-weight: 700;
     }
-
-    main {
-      width: min(100%, 620px);
-      margin: 0 auto;
-      padding: 22px 16px calc(28px + env(safe-area-inset-bottom));
-    }
-
-    .status {
-      margin-bottom: 20px;
-      padding: 12px 14px;
-      border-left: 4px solid var(--coral);
-      background: var(--coral-soft);
-      font-size: 14px;
-      line-height: 1.45;
-    }
-
-    form {
-      display: grid;
-      gap: 17px;
-    }
-
-    label {
-      display: grid;
-      gap: 7px;
-      font-size: 14px;
-      font-weight: 700;
-    }
-
+    .status-pill.approved { background: #e2f2e9; color: var(--green); }
+    .status-pill.rejected { background: #f8e5e5; color: var(--danger); }
+    form { display: grid; gap: 15px; }
+    label { display: grid; gap: 7px; font-size: 13px; font-weight: 700; }
     input, textarea {
-      width: 100%;
-      min-height: 48px;
-      border: 1px solid var(--line);
-      border-radius: 6px;
-      background: var(--surface);
-      color: var(--navy);
-      padding: 12px 13px;
-      font: inherit;
-      font-size: 16px;
-      outline: none;
+      width: 100%; min-height: 48px; padding: 12px;
+      border: 1px solid var(--line); border-radius: 6px;
+      background: var(--surface); color: var(--navy); outline: none; font-size: 16px;
     }
-
-    textarea {
-      min-height: 96px;
-      resize: vertical;
+    textarea { min-height: 92px; resize: vertical; }
+    input:focus, textarea:focus { border-color: var(--coral); box-shadow: 0 0 0 3px #f9e2df; }
+    .hint { margin-top: -3px; color: var(--muted); font-size: 12px; font-weight: 400; }
+    .primary, .secondary {
+      min-height: 50px; border-radius: 6px; font-size: 15px; font-weight: 700; cursor: pointer;
     }
-
-    input:focus, textarea:focus {
-      border-color: var(--coral);
-      box-shadow: 0 0 0 3px var(--coral-soft);
+    .primary { border: 0; background: var(--coral); color: white; }
+    .secondary { border: 1px solid var(--line); background: var(--surface); color: var(--navy); }
+    button:disabled { opacity: .55; cursor: wait; }
+    .message { display: none; padding: 12px; border-radius: 6px; font-size: 13px; line-height: 1.4; }
+    .message.error { display: block; background: #f8e5e5; color: var(--danger); }
+    .message.success { display: block; background: #e2f2e9; color: var(--green); }
+    .empty { padding: 24px 12px; color: var(--muted); text-align: center; }
+    .bottom-nav {
+      position: fixed; z-index: 10; left: 0; right: 0; bottom: 0;
+      display: grid; grid-template-columns: repeat(4, 1fr);
+      min-height: 66px; padding-bottom: env(safe-area-inset-bottom);
+      background: var(--surface); border-top: 1px solid var(--line);
     }
-
-    .hint {
-      margin: -2px 0 0;
-      color: var(--muted);
-      font-size: 12px;
-      font-weight: 400;
+    .nav-button {
+      border: 0; background: transparent; color: var(--muted);
+      font-size: 11px; font-weight: 700; cursor: pointer;
     }
-
-    button {
-      min-height: 50px;
-      border: 0;
-      border-radius: 6px;
-      background: var(--coral);
-      color: white;
-      font-size: 16px;
-      font-weight: 700;
-      cursor: pointer;
-    }
-
-    button:disabled {
-      opacity: .55;
-      cursor: wait;
-    }
-
-    .cancel-button {
-      background: transparent;
-      color: var(--navy);
-      border: 1px solid var(--line);
-    }
-
-    .message {
-      display: none;
-      padding: 12px 14px;
-      border: 1px solid var(--line);
-      border-radius: 6px;
-      background: var(--surface);
-      font-size: 14px;
-      line-height: 1.4;
-    }
-
-    .message.error {
-      display: block;
-      border-color: #d84b4b;
-      color: #9f2525;
-    }
-
-    .message.success {
-      display: block;
-      border-color: #2f8a5b;
-      color: #17663e;
-    }
+    .nav-button.active { color: var(--coral); border-top: 3px solid var(--coral); }
+    .loading { padding: 40px 16px; text-align: center; color: var(--muted); }
   </style>
 </head>
 <body>
-  <header class="topbar">
-    <img src="/assets/alliance-logo.jpeg" alt="Логотип Альянса">
-    <div>
-      <h1>Регистрация участника</h1>
-      <p>Гражданский Альянс города Астаны</p>
-    </div>
-  </header>
+  <div class="app">
+    <header class="topbar">
+      <img src="/assets/alliance-logo.jpeg" alt="Логотип Альянса">
+      <div>
+        <h1>Гражданский Альянс</h1>
+        <p>города Астаны</p>
+      </div>
+    </header>
 
-  <main>
-    <div class="status">Ваш номер телефона уже подтвержден через Telegram. Заполните оставшиеся данные.</div>
+    <main>
+      <div id="loading" class="loading">Загружаем приложение...</div>
 
-    <form id="registration-form">
-      <label>
-        ФИО полностью
-        <input id="full-name" name="fullName" autocomplete="name" required minlength="5" placeholder="Иванова Айгуль Сериковна">
-      </label>
+      <section id="registration-view" class="view">
+        <div class="eyebrow">Первый вход</div>
+        <h2>Регистрация участника</h2>
+        <p class="lead">Подтвердите номер в боте и заполните данные для доступа к приложению.</p>
+        <div id="registration-warning" class="band">
+          <strong>Номер телефона</strong>
+          <span>Перед заполнением формы нажмите в боте «Регистрация» и поделитесь номером.</span>
+        </div>
+        <form id="registration-form">
+          <label>ФИО полностью<input id="full-name" required minlength="5" placeholder="Иванова Айгуль Сериковна"></label>
+          <label>ИИН<input id="iin" inputmode="numeric" maxlength="12" pattern="[0-9]{12}" required placeholder="12 цифр"></label>
+          <label>Вид деятельности<textarea id="user-activity" required minlength="3" placeholder="Ваше основное направление деятельности"></textarea></label>
+          <div id="registration-message" class="message"></div>
+          <button class="primary" type="submit">Завершить регистрацию</button>
+          <button id="cancel-registration" class="secondary" type="button">Отменить регистрацию</button>
+        </form>
+      </section>
 
-      <label>
-        ИИН
-        <input id="iin" name="iin" inputmode="numeric" maxlength="12" pattern="[0-9]{12}" required placeholder="12 цифр">
-        <span class="hint">ИИН должен состоять из 12 цифр.</span>
-      </label>
+      <section id="home-view" class="view">
+        <div class="eyebrow">Личный кабинет</div>
+        <h2 id="welcome-title">Добро пожаловать</h2>
+        <p class="lead">Подавайте заявления и следите за статусом членства.</p>
+        <div class="band">
+          <strong>Гражданский Альянс города Астаны</strong>
+          <span>Развитие гражданского общества, поддержка инициатив и межсекторального взаимодействия.</span>
+        </div>
+        <div id="application-status" class="cards"></div>
+      </section>
 
-      <label>
-        Вид деятельности
-        <textarea id="activity" name="activity" required minlength="3" placeholder="Опишите основное направление деятельности"></textarea>
-      </label>
+      <section id="application-view" class="view">
+        <div class="eyebrow">Вступление в Альянс</div>
+        <h2>Подать компанию</h2>
+        <p class="lead">Заполните сведения об организации. После отправки заявление поступит администраторам.</p>
+        <form id="application-form">
+          <label>Полное наименование организации<input id="company-name" required minlength="3" placeholder="Общественный фонд «Добрые сердца»"></label>
+          <label>БИН организации<input id="org-bin" inputmode="numeric" maxlength="12" pattern="[0-9]{12}" required placeholder="12 цифр"></label>
+          <label>Вид деятельности организации<textarea id="company-activity" required minlength="3" placeholder="Основное направление работы организации"></textarea></label>
+          <div id="application-message" class="message"></div>
+          <button class="primary" type="submit">Подать заявление</button>
+        </form>
+      </section>
 
-      <div id="message" class="message" role="status"></div>
-      <button id="submit-button" type="submit">Завершить регистрацию</button>
-      <button id="cancel-button" class="cancel-button" type="button">Отменить регистрацию</button>
-    </form>
-  </main>
+      <section id="registry-view" class="view">
+        <div class="eyebrow">Официальные данные</div>
+        <h2>Реестр сертификатов</h2>
+        <p class="lead">Список организаций, принятых в состав членов Альянса.</p>
+        <div id="registry-list" class="cards"></div>
+      </section>
+
+      <section id="profile-view" class="view">
+        <div class="eyebrow">Учетная запись</div>
+        <h2>Профиль</h2>
+        <div id="profile-card" class="cards"></div>
+      </section>
+    </main>
+
+    <nav id="bottom-nav" class="bottom-nav" hidden>
+      <button class="nav-button active" data-view="home">Главная</button>
+      <button class="nav-button" data-view="application">Заявка</button>
+      <button class="nav-button" data-view="registry">Реестр</button>
+      <button class="nav-button" data-view="profile">Профиль</button>
+    </nav>
+  </div>
 
   <script>
-    const telegram = window.Telegram?.WebApp;
-    telegram?.ready();
-    telegram?.expand();
+    const tg = window.Telegram?.WebApp;
+    const initData = tg?.initData || "";
+    let state = { registered: false, profile: null, lastApplication: null };
+    tg?.ready();
+    tg?.expand();
+    tg?.BackButton.show();
+    tg?.BackButton.onClick(() => tg.close());
 
-    const form = document.getElementById("registration-form");
-    const message = document.getElementById("message");
-    const button = document.getElementById("submit-button");
-    const cancelButton = document.getElementById("cancel-button");
+    const byId = (id) => document.getElementById(id);
+    const api = async (url, options = {}) => {
+      const response = await fetch(url, options);
+      const result = await response.json();
+      if (!response.ok || result.ok === false) throw new Error(result.error || "Не удалось выполнить запрос.");
+      return result;
+    };
+    const showMessage = (id, text, type) => {
+      const element = byId(id);
+      element.textContent = text;
+      element.className = `message ${type}`;
+    };
+    const statusLabel = (status) => ({ pending: "На рассмотрении", approved: "Одобрено", rejected: "Отклонено" }[status] || status);
 
-    telegram?.BackButton.show();
-    telegram?.BackButton.onClick(() => telegram.close());
-
-    function showMessage(text, type) {
-      message.textContent = text;
-      message.className = `message ${type}`;
+    function showView(name) {
+      document.querySelectorAll(".view").forEach((view) => view.classList.remove("active"));
+      byId(`${name}-view`).classList.add("active");
+      document.querySelectorAll(".nav-button").forEach((button) => button.classList.toggle("active", button.dataset.view === name));
+      if (name === "registry") loadRegistry();
     }
 
-    form.addEventListener("submit", async (event) => {
+    function renderRegisteredApp() {
+      byId("loading").style.display = "none";
+      byId("bottom-nav").hidden = false;
+      byId("welcome-title").textContent = `Добро пожаловать, ${state.profile.fullName}`;
+      byId("profile-card").innerHTML = `
+        <article class="card"><h3>${state.profile.fullName}</h3>
+          <p>Телефон: ${state.profile.phone}</p><p>ИИН: ${state.profile.iin}</p><p>Деятельность: ${state.profile.activity}</p>
+        </article>`;
+      byId("application-status").innerHTML = state.lastApplication
+        ? `<article class="card"><h3>${state.lastApplication.companyName}</h3>
+            <span class="status-pill ${state.lastApplication.status}">${statusLabel(state.lastApplication.status)}</span>
+            <p>Заявление №${state.lastApplication.id} от ${state.lastApplication.createdAt}</p>
+            ${state.lastApplication.certificateNumber ? `<p>Сертификат: ${state.lastApplication.certificateNumber}</p>` : ""}
+          </article>`
+        : `<div class="empty">Вы еще не подавали заявление на вступление.</div>`;
+      showView("home");
+    }
+
+    async function loadMe() {
+      try {
+        const result = await api(`/api/me?initData=${encodeURIComponent(initData)}`);
+        state = result;
+        if (result.registered) renderRegisteredApp();
+        else {
+          byId("loading").style.display = "none";
+          byId("registration-view").classList.add("active");
+          if (result.pendingPhone) byId("registration-warning").style.display = "none";
+        }
+      } catch (error) {
+        byId("loading").textContent = "Откройте приложение через кнопку Launch в Telegram.";
+        loadRegistry();
+      }
+    }
+
+    async function loadRegistry() {
+      const list = byId("registry-list");
+      list.innerHTML = `<div class="empty">Загружаем реестр...</div>`;
+      try {
+        const result = await api("/api/certificates");
+        list.innerHTML = result.certificates.length
+          ? result.certificates.map((item) => `<article class="card"><h3>${item.companyName}</h3>
+              <p>Сертификат: ${item.certificateNumber}</p><p>БИН: ${item.orgBin}</p><p>Выдан: ${item.issuedAt}</p></article>`).join("")
+          : `<div class="empty">Выданных сертификатов пока нет.</div>`;
+      } catch (error) {
+        list.innerHTML = `<div class="empty">${error.message}</div>`;
+      }
+    }
+
+    document.querySelectorAll(".nav-button").forEach((button) => button.addEventListener("click", () => showView(button.dataset.view)));
+
+    byId("registration-form").addEventListener("submit", async (event) => {
       event.preventDefault();
-      button.disabled = true;
-      showMessage("Сохраняем данные...", "success");
-
       try {
-        const response = await fetch("/api/register", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            initData: telegram?.initData || "",
-            fullName: document.getElementById("full-name").value.trim(),
-            iin: document.getElementById("iin").value.trim(),
-            activity: document.getElementById("activity").value.trim()
-          })
-        });
-
-        const result = await response.json();
-        if (!response.ok || !result.ok) {
-          throw new Error(result.error || "Не удалось завершить регистрацию.");
-        }
-
-        showMessage("Регистрация завершена. Возвращаемся в бот.", "success");
-        setTimeout(() => telegram?.close(), 1200);
-      } catch (error) {
-        showMessage(error.message, "error");
-        button.disabled = false;
-      }
+        await api("/api/register", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({
+          initData, fullName: byId("full-name").value.trim(), iin: byId("iin").value.trim(), activity: byId("user-activity").value.trim()
+        }) });
+        showMessage("registration-message", "Регистрация завершена.", "success");
+        await loadMe();
+      } catch (error) { showMessage("registration-message", error.message, "error"); }
     });
 
-    cancelButton.addEventListener("click", async () => {
-      cancelButton.disabled = true;
-      try {
-        const response = await fetch("/api/cancel-registration", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ initData: telegram?.initData || "" })
-        });
-        const result = await response.json();
-        if (!response.ok || !result.ok) {
-          throw new Error(result.error || "Не удалось отменить регистрацию.");
-        }
-        telegram?.close();
-      } catch (error) {
-        showMessage(error.message, "error");
-        cancelButton.disabled = false;
-      }
+    byId("cancel-registration").addEventListener("click", async () => {
+      try { await api("/api/cancel-registration", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ initData }) }); tg?.close(); }
+      catch (error) { showMessage("registration-message", error.message, "error"); }
     });
+
+    byId("application-form").addEventListener("submit", async (event) => {
+      event.preventDefault();
+      try {
+        const result = await api("/api/applications", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({
+          initData, companyName: byId("company-name").value.trim(), orgBin: byId("org-bin").value.trim(), activity: byId("company-activity").value.trim()
+        }) });
+        showMessage("application-message", `Заявление №${result.applicationId} зарегистрировано.`, "success");
+        event.target.reset();
+        await loadMe();
+      } catch (error) { showMessage("application-message", error.message, "error"); }
+    });
+
+    loadMe();
   </script>
 </body>
 </html>
