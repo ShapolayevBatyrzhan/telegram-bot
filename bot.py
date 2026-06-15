@@ -495,7 +495,6 @@ def registration_webapp_keyboard() -> InlineKeyboardMarkup:
                     web_app=WebAppInfo(url=REGISTRATION_WEBAPP_URL),
                 )
             ],
-            [InlineKeyboardButton(text="Открыть форму в браузере", url=REGISTRATION_WEBAPP_URL)],
             [InlineKeyboardButton(text="Отменить регистрацию", callback_data="cancel_registration")],
         ]
     )
